@@ -23,7 +23,7 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
         self.parent.title = "SlicerPhotogrammetry"
         self.parent.categories = ["SlicerPhotogrammetry"]
         self.parent.dependencies = []
-        self.parent.contributors = ["Your Name"]
+        self.parent.contributors = ["Oshane Thomas"]
         self.parent.helpText = """NA"""
         self.parent.acknowledgementText = """NA"""
 
@@ -64,12 +64,16 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.prevButton = None
         self.nextButton = None
         self.maskButton = None
+        self.doneButton = None
+        self.imageIndexLabel = None
         self.maskAllImagesButton = None
+        self.maskAllProgressBar = None
         self.processButton = None
         self.imageSetComboBox = None
         self.placeBoundingBoxButton = None
         self.outputFolderSelector = None
         self.masterFolderSelector = None
+        self.processFoldersProgressBar = None
         self.previousButtonStates = {}
 
         # Show loading dialog only on initial load
@@ -376,7 +380,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             volumeNode.SetName(os.path.basename(self.imagePaths[i]))
             self.originalVolumes.append(volumeNode)
 
-    def loadAndFlipImageToArray(self, path):
+    @staticmethod
+    def loadAndFlipImageToArray(path):
         from PIL import Image
         img = Image.open(path).convert('RGB')
         arr = np.asarray(img)
@@ -431,7 +436,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         else:
             self.maskAllImagesButton.enabled = False
 
-    def showOriginalOnly(self, volNode):
+    @staticmethod
+    def showOriginalOnly(volNode):
         redComposite = slicer.app.layoutManager().sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComposite.SetBackgroundVolumeID(volNode.GetID())
         redComposite.SetForegroundVolumeID(None)
@@ -445,7 +451,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         slicer.app.layoutManager().sliceWidget('Red').sliceLogic().FitSliceToAll()
         slicer.app.layoutManager().sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
-    def showMaskedState(self, originalVol, maskNodes):
+    @staticmethod
+    def showMaskedState(originalVol, maskNodes):
         redComposite = slicer.app.layoutManager().sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComposite.SetBackgroundVolumeID(originalVol.GetID())
         redComposite.SetForegroundVolumeID(None)
@@ -555,7 +562,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.disablePointSelection()
             self.doneButton.enabled = True
 
-    def disablePointSelection(self):
+    @staticmethod
+    def disablePointSelection():
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
         interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
         interactionNode.SetPlaceModePersistence(0)
@@ -623,7 +631,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         x_max = max(p1_ijk[0], p2_ijk[0])
         y_min = min(p1_ijk[1], p2_ijk[1])
         y_max = max(p1_ijk[1], p2_ijk[1])
-        return (x_min, y_min, x_max, y_max)
+        return x_min, y_min, x_max, y_max
 
     def removeBboxFromCurrentImage(self):
         self.imageStates[self.currentImageIndex]["state"] = "none"
@@ -834,14 +842,15 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         ScriptedLoadableModuleLogic.__init__(self)
         from segment_anything import sam_model_registry, SamPredictor
         # Ensure weights are present
-        weights_filename = "sam_vit_b_01ec64.pth"
+        weights_filename = "sam_vit_l_0b3195.pth"
         sam_checkpoint = self.check_and_download_weights(weights_filename)
         self.device = "cpu"
-        self.sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
+        self.sam = sam_model_registry["vit_l"](checkpoint=sam_checkpoint)
         self.sam.to(device=self.device)
         self.predictor = SamPredictor(self.sam)
 
-    def check_and_download_weights(self, filename):
+    @staticmethod
+    def check_and_download_weights(filename):
         """Check if the SAM weights file exists, if not, download it."""
         # Construct the resource path for the file
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
@@ -849,7 +858,7 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
 
         if not os.path.isfile(resourcePath):
             # File not present, download from source
-            weights_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+            weights_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
             slicer.util.infoDisplay(f"Downloading {filename}. This may take a few minutes...", autoCloseMsec=2000)
             try:
                 slicer.util.downloadFile(url=weights_url, targetFilePath=resourcePath)
@@ -861,7 +870,9 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def get_image_paths_from_folder(folder_path: str,
-                                    extensions: List[str] = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]) -> List[str]:
+                                    extensions=None) -> List[str]:
+        if extensions is None:
+            extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
         folder_path = os.path.abspath(folder_path)
         image_paths = []
         if os.path.isdir(folder_path):
