@@ -475,7 +475,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         stateInfo = self.imageStates[self.currentImageIndex]
         state = stateInfo["state"]
-
+        print('You are about to start placing points')
         if state == "masked":
             if slicer.util.confirmYesNoDisplay(
                     "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"):
@@ -577,6 +577,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.doneButton.enabled = False
         self.maskButton.enabled = True
+
+        print('Mask Button After Done Clicked:', self.maskButton.enabled)
         self.updateVolumeDisplay()
 
         prevIndex = self.currentImageIndex - 1
@@ -587,13 +589,18 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.updateVolumeDisplay()
             self.currentImageIndex = originalIndex
             self.updateVolumeDisplay()
+            print('Mask Button after back:', self.maskButton.enabled)
         elif nextIndex < len(self.imagePaths):
             self.currentImageIndex = nextIndex
             self.updateVolumeDisplay()
             self.currentImageIndex = originalIndex
             self.updateVolumeDisplay()
+            print('Mask Button after forward:', self.maskButton.enabled)
 
         self.restoreButtonStates()
+        print('Mask Button State after restoreButtonStates:', self.maskButton.enabled)
+        self.maskButton.enabled = True
+        print('Mask Button State After Setting State Manually:', self.maskButton.enabled)
 
     def computeBboxFromFiducials(self):
         p1 = [0.0, 0.0, 0.0]
