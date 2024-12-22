@@ -845,7 +845,7 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
             weights_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
             slicer.util.infoDisplay(f"Downloading {filename}. This may take a few minutes...", autoCloseMsec=2000)
             try:
-                slicer.util.downloadFile(url=weights_url, filepath=resourcePath)
+                slicer.util.downloadFile(url=weights_url, targetFilePath=resourcePath)
             except Exception as e:
                 slicer.util.errorDisplay(f"Failed to download {filename}: {str(e)}")
                 raise RuntimeError("Could not download SAM weights.")
