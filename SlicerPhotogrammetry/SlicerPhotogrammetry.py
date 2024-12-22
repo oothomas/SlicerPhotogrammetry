@@ -834,10 +834,10 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         ScriptedLoadableModuleLogic.__init__(self)
         from segment_anything import sam_model_registry, SamPredictor
         # Ensure weights are present
-        weights_filename = "sam_vit_h_4b8939.pth"
+        weights_filename = "sam_vit_b_01ec64.pth"
         sam_checkpoint = self.check_and_download_weights(weights_filename)
         self.device = "cpu"
-        self.sam = sam_model_registry["vit_h"](checkpoint=sam_checkpoint)
+        self.sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
         self.sam.to(device=self.device)
         self.predictor = SamPredictor(self.sam)
 
@@ -849,7 +849,7 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
 
         if not os.path.isfile(resourcePath):
             # File not present, download from source
-            weights_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+            weights_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
             slicer.util.infoDisplay(f"Downloading {filename}. This may take a few minutes...", autoCloseMsec=2000)
             try:
                 slicer.util.downloadFile(url=weights_url, targetFilePath=resourcePath)
