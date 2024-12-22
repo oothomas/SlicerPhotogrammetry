@@ -10,10 +10,12 @@ import torch
 from slicer.ScriptedLoadableModule import *
 from typing import List
 
+
 def getWeights(filename):
     modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
     resourcePath = os.path.join(modulePath, 'Resources', filename)
     return resourcePath
+
 
 class SlicerPhotogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -24,6 +26,7 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
         self.parent.contributors = ["Your Name"]
         self.parent.helpText = """NA"""
         self.parent.acknowledgementText = """NA"""
+
 
 class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     try:
@@ -216,7 +219,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.processFoldersProgressBar.setRange(0, len(subfolders))
             for i, sf in enumerate(subfolders):
                 self.imageSetComboBox.addItem(sf)
-                self.processFoldersProgressBar.setValue(i+1)
+                self.processFoldersProgressBar.setValue(i + 1)
                 slicer.app.processEvents()
             self.imageSetComboBox.enabled = True
         else:
@@ -519,7 +522,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode)
             self.boundingBoxFiducialNode = None
 
-        self.boundingBoxFiducialNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode","BoundingBoxPoints")
+        self.boundingBoxFiducialNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode",
+                                                                          "BoundingBoxPoints")
         self.boundingBoxFiducialNode.CreateDefaultDisplayNodes()
         dnode = self.boundingBoxFiducialNode.GetDisplayNode()
         dnode.SetGlyphTypeFromString("Sphere3D")
@@ -531,7 +535,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.boundingBoxFiducialNode.RemoveAllControlPoints()
         self.boundingBoxFiducialNode.RemoveAllObservers()
-        self.boundingBoxFiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.onBoundingBoxPointPlaced)
+        self.boundingBoxFiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
+                                                 self.onBoundingBoxPointPlaced)
 
         selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
@@ -733,13 +738,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         bboxCoords = stateInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
-        imagesToMask = [i for i in range(len(self.imagePaths)) if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
+        imagesToMask = [i for i in range(len(self.imagePaths)) if
+                        i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
         self.maskAllProgressBar.setRange(0, len(imagesToMask))
         self.maskAllProgressBar.setValue(0)
 
         for count, i in enumerate(imagesToMask):
             self.maskSingleImage(i, bboxCoords)
-            self.maskAllProgressBar.setValue(count+1)
+            self.maskAllProgressBar.setValue(count + 1)
             slicer.app.processEvents()
 
         slicer.util.infoDisplay("All images masked and saved.")
@@ -815,6 +821,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.saveCurrentSetState()
         self.clearAllCreatedNodes()
 
+
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
@@ -872,4 +879,3 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
             )
         mask = masks[0].astype(np.uint8)
         return mask
-
