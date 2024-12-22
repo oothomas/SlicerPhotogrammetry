@@ -7,6 +7,7 @@ import slicer
 import shutil
 import numpy as np
 import torch
+import time  # for timing
 from slicer.ScriptedLoadableModule import *
 from typing import List
 
@@ -40,13 +41,19 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     except ImportError:
         slicer.util.pip_install("git+https://github.com/facebookresearch/segment-anything.git")
         import segment_anything
+
     from segment_anything import sam_model_registry, SamPredictor
 
     def __init__(self, parent=None):
+        """
+        Removed the old QProgressDialog from the constructor so it no longer appears or stays open.
+        """
         ScriptedLoadableModuleWidget.__init__(self, parent)
+
         self.logic = SlicerPhotogrammetryLogic()
 
-        self.setStates = {}  # per-set states
+        # Per-set states
+        self.setStates = {}
         self.currentSet = None
         self.imagePaths = []
         self.currentImageIndex = 0
@@ -60,6 +67,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.boundingBoxFiducialNode = None
         self.placingBoundingBox = False
 
+        # UI elements
         self.buttonsToManage = []
         self.prevButton = None
         self.nextButton = None
@@ -76,22 +84,41 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.processFoldersProgressBar = None
         self.previousButtonStates = {}
 
-        # Show loading dialog only on initial load
-        self.loadingDialog = qt.QProgressDialog("Loading SlicerPhotogrammetry...", None, 0, 0, self.parent)
-        self.loadingDialog.setWindowModality(qt.Qt.WindowModal)
-        self.loadingDialog.show()
+        # Model selection controls
+        self.samVariantCombo = None
+        self.loadModelButton = None
+        self.modelLoaded = False  # We'll track if the SAM model is loaded
 
     def setup(self):
+        """
+        Called when the module is first opened.
+        """
         ScriptedLoadableModuleWidget.setup(self)
         self.layout.setAlignment(qt.Qt.AlignTop)
 
+        # Create the 2-slice custom layout
         self.createCustomLayout()
 
+        # UI Panel
         parametersCollapsibleButton = ctk.ctkCollapsibleButton()
         parametersCollapsibleButton.text = "Import Image Sets"
         self.layout.addWidget(parametersCollapsibleButton)
         parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
+        # 1) SAM Variant dropdown
+        self.samVariantCombo = qt.QComboBox()
+        # Updated the label text to reflect approximate model sizes
+        self.samVariantCombo.addItem("ViT-base (~376 MB)")   # => "vit_b"
+        self.samVariantCombo.addItem("ViT-large (~1.03 GB)")  # => "vit_l"
+        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")  # => "vit_h"
+        parametersFormLayout.addRow("SAM Variant:", self.samVariantCombo)
+
+        # 2) Load Model button
+        self.loadModelButton = qt.QPushButton("Load Model")
+        parametersFormLayout.addWidget(self.loadModelButton)
+        self.loadModelButton.connect('clicked(bool)', self.onLoadModelClicked)
+
+        # 3) Master/Output Folder controls
         self.masterFolderSelector = ctk.ctkDirectoryButton()
         self.masterFolderSelector.directory = ""
         parametersFormLayout.addRow("Master Folder:", self.masterFolderSelector)
@@ -100,25 +127,28 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.outputFolderSelector.directory = ""
         parametersFormLayout.addRow("Output Folder:", self.outputFolderSelector)
 
+        # 4) "Process Folders" + progress bar
         self.processButton = qt.QPushButton("Process Folders")
         parametersFormLayout.addWidget(self.processButton)
         self.processButton.connect('clicked(bool)', self.onProcessFoldersClicked)
 
-        # Add a progress bar for Process Folders
         self.processFoldersProgressBar = qt.QProgressBar()
         self.processFoldersProgressBar.setVisible(False)
         parametersFormLayout.addWidget(self.processFoldersProgressBar)
 
+        # 5) Image set selector
         self.imageSetComboBox = qt.QComboBox()
         self.imageSetComboBox.enabled = False
         parametersFormLayout.addRow("Image Set:", self.imageSetComboBox)
         self.imageSetComboBox.connect('currentIndexChanged(int)', self.onImageSetSelected)
 
+        # 6) Place bounding box
         self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
         self.placeBoundingBoxButton.enabled = False
         parametersFormLayout.addWidget(self.placeBoundingBoxButton)
         self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
 
+        # 7) Done, Mask
         self.doneButton = qt.QPushButton("Done")
         self.doneButton.enabled = False
         parametersFormLayout.addWidget(self.doneButton)
@@ -129,6 +159,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addWidget(self.maskButton)
         self.maskButton.connect('clicked(bool)', self.onMaskClicked)
 
+        # 8) Navigation
         navigationLayout = qt.QHBoxLayout()
         self.prevButton = qt.QPushButton("<-")
         self.nextButton = qt.QPushButton("->")
@@ -142,35 +173,42 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.prevButton.connect('clicked(bool)', self.onPrevImage)
         self.nextButton.connect('clicked(bool)', self.onNextImage)
 
-        self.maskAllImagesButton = qt.QPushButton("Mask All Images")
+        # 9) Mask All Images In Set + progress bar
+        self.maskAllImagesButton = qt.QPushButton("Mask All Images In Set")
         self.maskAllImagesButton.enabled = False
         parametersFormLayout.addWidget(self.maskAllImagesButton)
         self.maskAllImagesButton.connect('clicked(bool)', self.onMaskAllImagesClicked)
 
-        # Add a progress bar for Mask All Images
         self.maskAllProgressBar = qt.QProgressBar()
         self.maskAllProgressBar.setVisible(False)
+        self.maskAllProgressBar.setTextVisible(True)     # so we can show text
         parametersFormLayout.addWidget(self.maskAllProgressBar)
 
-        self.layout.addStretch(1)
-
-        # Store references to all buttons we will manage
+        # 10) All controls that remain disabled until model is loaded
         self.buttonsToManage = [
+            self.masterFolderSelector,
+            self.outputFolderSelector,
             self.processButton,
             self.imageSetComboBox,
             self.placeBoundingBoxButton,
+            self.doneButton,
             self.maskButton,
             self.maskAllImagesButton,
             self.prevButton,
-            self.nextButton,
-            self.masterFolderSelector,
-            self.outputFolderSelector
+            self.nextButton
         ]
+        for btn in self.buttonsToManage:
+            if isinstance(btn, qt.QComboBox):
+                btn.setEnabled(False)
+            else:
+                btn.enabled = False
 
-        # Loading complete, hide dialog
-        self.loadingDialog.close()
+        self.layout.addStretch(1)
 
     def createCustomLayout(self):
+        """
+        Creates a custom layout with two slice viewers: Red and Red2.
+        """
         customLayout = """
         <layout type="horizontal" split="true">
           <item>
@@ -194,13 +232,65 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         layoutNode.AddLayoutDescription(self.layoutId, customLayout)
         layoutManager.setLayout(self.layoutId)
 
+    # ----------------------------------------------------------------------
+    #  (A) Model loading methods
+    # ----------------------------------------------------------------------
+    def onLoadModelClicked(self):
+        """
+        Called when user clicks the "Load Model" button. We pick the SAM variant
+        from samVariantCombo, then attempt to download/load the model.
+        Once successful, enable the rest of the UI.
+        """
+        variant = self.samVariantCombo.currentText
+        # Adjusted names to match what's in the combo:
+        variantInfo = {
+            "ViT-huge (~2.55 GB)": {
+                "filename": "sam_vit_h_4b8939.pth",
+                "url": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
+                "registry_key": "vit_h"
+            },
+            "ViT-large (~1.03 GB)": {
+                "filename": "sam_vit_l_0b3195.pth",
+                "url": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth",
+                "registry_key": "vit_l"
+            },
+            "ViT-base (~376 MB)": {
+                "filename": "sam_vit_b_01ec64.pth",
+                "url": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
+                "registry_key": "vit_b"
+            }
+        }
+
+        info = variantInfo[variant]
+        filename = info["filename"]
+        url = info["url"]
+        registry_key = info["registry_key"]
+
+        success = self.logic.loadSAMModel(variant=registry_key, filename=filename, url=url)
+        if success:
+            slicer.util.infoDisplay(f"{variant} model loaded successfully.")
+            self.modelLoaded = True
+            # Enable the rest of the UI that is relevant
+            self.processButton.setEnabled(True)
+            self.masterFolderSelector.setEnabled(True)
+            self.outputFolderSelector.setEnabled(True)
+            self.samVariantCombo.setEnabled(False)
+            self.loadModelButton.setEnabled(False)
+
+        else:
+            slicer.util.errorDisplay("Failed to load the model. Check the error log.")
+
+    # ----------------------------------------------------------------------
+    #  (B) "Process Folders" methods
+    # ----------------------------------------------------------------------
     def onProcessFoldersClicked(self):
-        # Check if any set has progress made
+        if not self.modelLoaded:
+            slicer.util.warningDisplay("Please load a SAM model before processing folders.")
+            return
+
         if self.anySetHasProgress():
-            # Prompt user that all progress will be lost
             if not slicer.util.confirmYesNoDisplay("All progress made so far will be lost. Proceed?"):
                 return
-            # If yes, clear all data
             self.clearAllData()
 
         masterFolderPath = self.masterFolderSelector.directory
@@ -212,7 +302,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay("Please select a valid output folder.")
             return
 
-        # Show process folders progress bar
         self.processFoldersProgressBar.setVisible(True)
         self.processFoldersProgressBar.setValue(0)
 
@@ -232,7 +321,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.processFoldersProgressBar.setVisible(False)
 
     def anySetHasProgress(self):
-        # Check if any image in any set is in "bbox" or "masked"
         for setName, setData in self.setStates.items():
             for idx, stateInfo in setData["imageStates"].items():
                 if stateInfo["state"] in ["bbox", "masked"]:
@@ -240,7 +328,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         return False
 
     def clearAllData(self):
-        # Clear self.setStates and unload any currently loaded set
         self.setStates = {}
         self.currentSet = None
         self.clearAllCreatedNodes()
@@ -250,7 +337,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.currentImageIndex = 0
         self.imageSetComboBox.clear()
         self.imageSetComboBox.enabled = False
-        # Reset UI states
+
         self.placeBoundingBoxButton.enabled = False
         self.doneButton.enabled = False
         self.maskButton.enabled = False
@@ -259,6 +346,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.nextButton.enabled = False
         self.imageIndexLabel.setText("[Image 0]")
 
+    # ----------------------------------------------------------------------
+    #  (C) onImageSetSelected method is needed for the combo box
+    # ----------------------------------------------------------------------
     def onImageSetSelected(self, index):
         if index < 0:
             return
@@ -312,7 +402,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.setStates[self.currentSet]["imageStates"] = self.imageStates
 
-        # Remove volumes from scene
         for vol in self.originalVolumes:
             if vol and slicer.mrmlScene.IsNodePresent(vol):
                 slicer.mrmlScene.RemoveNode(vol)
@@ -405,8 +494,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def updateVolumeDisplay(self):
         self.imageIndexLabel.setText(f"[Image {self.currentImageIndex}]")
-        currentOriginal = self.originalVolumes[self.currentImageIndex]
+        if not self.originalVolumes or self.currentImageIndex >= len(self.originalVolumes):
+            return
 
+        currentOriginal = self.originalVolumes[self.currentImageIndex]
         self.removeBboxLines()
 
         stateInfo = self.imageStates[self.currentImageIndex]
@@ -430,7 +521,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.enableMaskAllImagesIfPossible()
 
     def enableMaskAllImagesIfPossible(self):
-        stateInfo = self.imageStates[self.currentImageIndex]
+        stateInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stateInfo:
+            return
         if stateInfo["state"] == "masked" and stateInfo["bboxCoords"] is not None:
             self.maskAllImagesButton.enabled = True
         else:
@@ -453,15 +546,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     @staticmethod
     def showMaskedState(originalVol, maskNodes):
+        if "labelVol" not in maskNodes or "maskedVol" not in maskNodes:
+            return
+        labelVol = maskNodes["labelVol"]
+        maskedVol = maskNodes["maskedVol"]
+
         redComposite = slicer.app.layoutManager().sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComposite.SetBackgroundVolumeID(originalVol.GetID())
         redComposite.SetForegroundVolumeID(None)
-        redComposite.SetLabelVolumeID(maskNodes["labelVol"].GetID())
+        redComposite.SetLabelVolumeID(labelVol.GetID())
         redComposite.SetLabelOpacity(0.5)
         slicer.app.layoutManager().sliceWidget('Red').sliceLogic().FitSliceToAll()
 
         red2Composite = slicer.app.layoutManager().sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
-        red2Composite.SetBackgroundVolumeID(maskNodes["maskedVol"].GetID())
+        red2Composite.SetBackgroundVolumeID(maskedVol.GetID())
         red2Composite.SetForegroundVolumeID(None)
         red2Composite.SetLabelVolumeID(None)
         slicer.app.layoutManager().sliceWidget('Red2').sliceLogic().FitSliceToAll()
@@ -476,13 +574,16 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.currentImageIndex += 1
             self.updateVolumeDisplay()
 
+    # -------------- Place Bbox --------------
     def onPlaceBoundingBoxClicked(self):
         self.storeCurrentButtonStates()
         self.disableAllButtonsExceptDone()
 
-        stateInfo = self.imageStates[self.currentImageIndex]
+        stateInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stateInfo:
+            return
         state = stateInfo["state"]
-        print('You are about to start placing points')
+
         if state == "masked":
             if slicer.util.confirmYesNoDisplay(
                     "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"):
@@ -569,7 +670,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         interactionNode.SetPlaceModePersistence(0)
 
     def onDoneClicked(self):
-        if self.boundingBoxFiducialNode is None or self.boundingBoxFiducialNode.GetNumberOfDefinedControlPoints() < 2:
+        if (not self.boundingBoxFiducialNode or
+                self.boundingBoxFiducialNode.GetNumberOfDefinedControlPoints() < 2):
             slicer.util.warningDisplay("You must place two points first.")
             return
 
@@ -586,9 +688,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.doneButton.enabled = False
         self.maskButton.enabled = True
 
-        print('Mask Button After Done Clicked:', self.maskButton.enabled)
         self.updateVolumeDisplay()
 
+        # Programmatically refresh lines
         prevIndex = self.currentImageIndex - 1
         nextIndex = self.currentImageIndex + 1
         originalIndex = self.currentImageIndex
@@ -597,18 +699,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.updateVolumeDisplay()
             self.currentImageIndex = originalIndex
             self.updateVolumeDisplay()
-            print('Mask Button after back:', self.maskButton.enabled)
         elif nextIndex < len(self.imagePaths):
             self.currentImageIndex = nextIndex
             self.updateVolumeDisplay()
             self.currentImageIndex = originalIndex
             self.updateVolumeDisplay()
-            print('Mask Button after forward:', self.maskButton.enabled)
 
         self.restoreButtonStates()
-        print('Mask Button State after restoreButtonStates:', self.maskButton.enabled)
+        # In some workflows you might want to re-enable mask button explicitly:
         self.maskButton.enabled = True
-        print('Mask Button State After Setting State Manually:', self.maskButton.enabled)
 
     def computeBboxFromFiducials(self):
         p1 = [0.0, 0.0, 0.0]
@@ -634,13 +733,16 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         return x_min, y_min, x_max, y_max
 
     def removeBboxFromCurrentImage(self):
-        self.imageStates[self.currentImageIndex]["state"] = "none"
-        self.imageStates[self.currentImageIndex]["bboxCoords"] = None
-        self.imageStates[self.currentImageIndex]["maskNodes"] = None
+        if self.imageStates.get(self.currentImageIndex):
+            self.imageStates[self.currentImageIndex]["state"] = "none"
+            self.imageStates[self.currentImageIndex]["bboxCoords"] = None
+            self.imageStates[self.currentImageIndex]["maskNodes"] = None
         self.removeBboxLines()
 
     def removeMaskFromCurrentImage(self):
-        stateInfo = self.imageStates[self.currentImageIndex]
+        stateInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stateInfo:
+            return
         if stateInfo["maskNodes"] is not None:
             m = stateInfo["maskNodes"]
             for nodeKey in ["labelVol", "colorNode", "maskedVol"]:
@@ -652,8 +754,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         stateInfo["bboxCoords"] = None
 
     def onMaskClicked(self):
-        stateInfo = self.imageStates[self.currentImageIndex]
-        if stateInfo["state"] != "bbox":
+        stateInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stateInfo or stateInfo["state"] != "bbox":
             slicer.util.warningDisplay("No bounding box defined for this image.")
             return
 
@@ -699,7 +801,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         }
 
         self.removeBboxLines()
-
         self.processedOnce = True
         self.saveMaskedImage(self.currentImageIndex, mask)
         self.updateVolumeDisplay()
@@ -711,6 +812,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.currentBboxLineNodes = []
 
     def drawBboxLines(self, bboxCoords):
+        if not bboxCoords:
+            return
         currentVol = self.originalVolumes[self.currentImageIndex]
         ijkToRasMatrix = vtk.vtkMatrix4x4()
         currentVol.GetIJKToRASMatrix(ijkToRasMatrix)
@@ -742,28 +845,71 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             dnode.SetPointLabelsVisibility(False)
             dnode.SetPropertiesLabelVisibility(False)
             dnode.SetTextScale(0)
-
             self.currentBboxLineNodes.append(lineNode)
 
     def onMaskAllImagesClicked(self):
-        stateInfo = self.imageStates[self.currentImageIndex]
-        if stateInfo["state"] != "masked" or stateInfo["bboxCoords"] is None:
+        """
+        This function now provides time details (elapsed, remain) as it processes each image.
+        """
+        stateInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stateInfo or stateInfo["state"] != "masked" or not stateInfo["bboxCoords"]:
             slicer.util.warningDisplay("Current image is not masked or has no bounding box info.")
             return
 
         bboxCoords = stateInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
-        imagesToMask = [i for i in range(len(self.imagePaths)) if
-                        i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
-        self.maskAllProgressBar.setRange(0, len(imagesToMask))
+        self.maskAllProgressBar.setTextVisible(True)
+        imagesToMask = [i for i in range(len(self.imagePaths))
+                        if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
+        num_images = len(imagesToMask)
+        self.maskAllProgressBar.setRange(0, num_images)
         self.maskAllProgressBar.setValue(0)
 
+        if num_images == 0:
+            slicer.util.infoDisplay("All images in this set are already masked.")
+            self.maskAllProgressBar.setVisible(False)
+            return
+
+        start_time = time.time()
+
         for count, i in enumerate(imagesToMask):
+            # Mark start of iteration
+            iteration_start = time.time()
+
+            # Mask the single image
             self.maskSingleImage(i, bboxCoords)
-            self.maskAllProgressBar.setValue(count + 1)
+            # Update the progress
+            processed = count + 1
+            self.maskAllProgressBar.setValue(processed)
+
+            # Calculate elapsed time so far
+            elapsed_secs = time.time() - start_time
+            # Average time per image
+            avg_per_image = elapsed_secs / processed
+            # Remain time
+            remain = avg_per_image * (num_images - processed)
+
+            def format_seconds(sec):
+                # Quick helper to format secs as HH:MM:SS
+                sec = int(sec)
+                h = sec // 3600
+                m = (sec % 3600) // 60
+                s = sec % 60
+                if h > 0:
+                    return f"{h:02d}:{m:02d}:{s:02d}"
+                else:
+                    return f"{m:02d}:{s:02d}"
+
+            elapsed_str = format_seconds(elapsed_secs)
+            remain_str = format_seconds(remain)
+
+            # Set progress bar text
+            msg = f"Masking image {processed}/{num_images} | Elapsed: {elapsed_str}, Remain: {remain_str}"
+            self.maskAllProgressBar.setFormat(msg)
+
             slicer.app.processEvents()
 
-        slicer.util.infoDisplay("All images masked and saved.")
+        slicer.util.infoDisplay("All images in set masked and saved.")
         self.maskAllProgressBar.setVisible(False)
         self.updateVolumeDisplay()
 
@@ -803,8 +949,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "labelArray": labelArray,
             "grayMasked": grayMasked
         }
-
-        self.saveMaskedImage(index, mask)
+        maskBool = (mask > 0)
+        self.saveMaskedImage(index, maskBool)
 
     def saveMaskedImage(self, index, mask):
         from PIL import Image
@@ -812,8 +958,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setOutputFolder = os.path.join(outputFolder, self.currentSet)
         os.makedirs(setOutputFolder, exist_ok=True)
 
-        stateInfo = self.imageStates[index]
-        if stateInfo["state"] != "masked" or stateInfo["maskNodes"] is None:
+        stateInfo = self.imageStates.get(index, None)
+        if (not stateInfo or stateInfo["state"] != "masked" or
+                not stateInfo["maskNodes"]):
             print("No masked volume available for saving this image.")
             return
 
@@ -840,37 +987,48 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
-        from segment_anything import sam_model_registry, SamPredictor
-        # Ensure weights are present
-        weights_filename = "sam_vit_l_0b3195.pth"
-        sam_checkpoint = self.check_and_download_weights(weights_filename)
-        self.device = "cpu"
-        self.sam = sam_model_registry["vit_l"](checkpoint=sam_checkpoint)
-        self.sam.to(device=self.device)
-        self.predictor = SamPredictor(self.sam)
+        self.predictor = None
+        self.sam = None
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda:0")
+            print("Using CUDA:0")
+        else:
+            self.device = torch.device("cpu")
+            print("Using CPU")
+
+    def loadSAMModel(self, variant, filename, url):
+        """
+        Attempt to download weights if needed, then initialize the SAM model
+        with the specified registry key (variant).
+        """
+        try:
+            sam_checkpoint = self.check_and_download_weights(filename, url)
+            import segment_anything
+            from segment_anything import sam_model_registry, SamPredictor
+            self.sam = sam_model_registry[variant](checkpoint=sam_checkpoint)
+            self.sam.to(device=self.device)
+            self.predictor = SamPredictor(self.sam)
+            return True
+        except Exception as e:
+            print(f"Error loading SAM model: {e}")
+            return False
 
     @staticmethod
-    def check_and_download_weights(filename):
-        """Check if the SAM weights file exists, if not, download it."""
-        # Construct the resource path for the file
+    def check_and_download_weights(filename, weights_url):
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         resourcePath = os.path.join(modulePath, 'Resources', filename)
 
         if not os.path.isfile(resourcePath):
-            # File not present, download from source
-            weights_url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
             slicer.util.infoDisplay(f"Downloading {filename}. This may take a few minutes...", autoCloseMsec=2000)
             try:
                 slicer.util.downloadFile(url=weights_url, targetFilePath=resourcePath)
             except Exception as e:
                 slicer.util.errorDisplay(f"Failed to download {filename}: {str(e)}")
                 raise RuntimeError("Could not download SAM weights.")
-
         return resourcePath
 
     @staticmethod
-    def get_image_paths_from_folder(folder_path: str,
-                                    extensions=None) -> List[str]:
+    def get_image_paths_from_folder(folder_path: str, extensions=None) -> List[str]:
         if extensions is None:
             extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
         folder_path = os.path.abspath(folder_path)
@@ -885,6 +1043,11 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         return sorted(image_paths)
 
     def run_sam_segmentation(self, image_rgb, bounding_box):
+        """
+        Run SAM segmentation using the current predictor.
+        """
+        if not self.predictor:
+            raise RuntimeError("SAM model is not loaded. Please load model first.")
         self.predictor.set_image(image_rgb)
         box = np.array(bounding_box, dtype=np.float32)
         import torch
@@ -895,5 +1058,4 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
                 box=box,
                 multimask_output=False
             )
-        mask = masks[0].astype(np.uint8)
-        return mask
+        return masks[0].astype(np.uint8)
