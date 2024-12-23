@@ -30,6 +30,14 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
 
 
 class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
+    """
+    This widget manages UI controls for:
+    1) Model loading (SAM variants),
+    2) Folder selection and processing,
+    3) Volume creation (grayscale for display),
+    4) Masking operations using the full color arrays.
+    """
+
     try:
         from PIL import Image
     except ImportError:
@@ -45,23 +53,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     from segment_anything import sam_model_registry, SamPredictor
 
     def __init__(self, parent=None):
-        """
-        Removed the old QProgressDialog from the constructor so it no longer appears or stays open.
-        """
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
         self.logic = SlicerPhotogrammetryLogic()
 
-        # Per-set states
+        # Each image set has:
+        #   - imagePaths,
+        #   - imageStates (dict of "none"/"bbox"/"masked"),
+        #   - originalGrayArrays (grayscale for slice volumes),
+        #   - originalColorArrays (RGB for SAM).
         self.setStates = {}
         self.currentSet = None
         self.imagePaths = []
         self.currentImageIndex = 0
-        self.originalVolumes = []
+        self.originalVolumes = []  # Grayscale volumes for display
         self.processedOnce = False
         self.layoutId = 1003
 
-        self.imageStates = {}
+        self.imageStates = {}      # {idx: {"state":..., "bboxCoords":..., "maskNodes":...}}
         self.createdNodes = []
         self.currentBboxLineNodes = []
         self.boundingBoxFiducialNode = None
@@ -107,10 +116,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # 1) SAM Variant dropdown
         self.samVariantCombo = qt.QComboBox()
-        # Updated the label text to reflect approximate model sizes
-        self.samVariantCombo.addItem("ViT-base (~376 MB)")   # => "vit_b"
+        self.samVariantCombo.addItem("ViT-base (~376 MB)")    # => "vit_b"
         self.samVariantCombo.addItem("ViT-large (~1.03 GB)")  # => "vit_l"
-        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")  # => "vit_h"
+        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")   # => "vit_h"
         parametersFormLayout.addRow("SAM Variant:", self.samVariantCombo)
 
         # 2) Load Model button
@@ -181,7 +189,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.maskAllProgressBar = qt.QProgressBar()
         self.maskAllProgressBar.setVisible(False)
-        self.maskAllProgressBar.setTextVisible(True)     # so we can show text
+        self.maskAllProgressBar.setTextVisible(True)  # Show text for time details
         parametersFormLayout.addWidget(self.maskAllProgressBar)
 
         # 10) All controls that remain disabled until model is loaded
@@ -242,7 +250,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         Once successful, enable the rest of the UI.
         """
         variant = self.samVariantCombo.currentText
-        # Adjusted names to match what's in the combo:
         variantInfo = {
             "ViT-huge (~2.55 GB)": {
                 "filename": "sam_vit_h_4b8939.pth",
@@ -370,10 +377,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.originalVolumes = []
             self.imageStates = {}
 
-            originalArrays = []
+            # We'll maintain both color arrays and grayscale arrays.
+            originalGrayArrays = []
+            originalColorArrays = []
             for i, path in enumerate(self.imagePaths):
-                arr = self.loadAndFlipImageToArray(path)
-                originalArrays.append(arr)
+                colorArr, grayArr = self.loadImageColorAndGray(path)
+                originalColorArrays.append(colorArr)
+                originalGrayArrays.append(grayArr)
                 self.imageStates[i] = {
                     "state": "none",
                     "bboxCoords": None,
@@ -381,11 +391,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 }
 
             self.currentImageIndex = 0
-            self.createVolumesFromArrays(originalArrays)
+            # Create grayscale volumes for display
+            self.createVolumesFromGrayArrays(originalGrayArrays)
+
+            # Store in setStates
             self.setStates[self.currentSet] = {
                 "imagePaths": self.imagePaths,
                 "imageStates": self.imageStates,
-                "originalArrays": originalArrays,
+                "originalGrayArrays": originalGrayArrays,
+                "originalColorArrays": originalColorArrays
             }
 
             self.updateVolumeDisplay()
@@ -400,12 +414,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if self.currentSet is None or self.currentSet not in self.setStates:
             return
 
+        # Update the imageStates in setStates
         self.setStates[self.currentSet]["imageStates"] = self.imageStates
 
+        # Remove volumes from scene
         for vol in self.originalVolumes:
             if vol and slicer.mrmlScene.IsNodePresent(vol):
                 slicer.mrmlScene.RemoveNode(vol)
         self.originalVolumes = []
+
         for idx, stateInfo in self.imageStates.items():
             if stateInfo["state"] == "masked" and stateInfo["maskNodes"] is not None:
                 m = stateInfo["maskNodes"]
@@ -419,10 +436,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setData = self.setStates[setName]
         self.imagePaths = setData["imagePaths"]
         self.imageStates = setData["imageStates"]
-        originalArrays = setData["originalArrays"]
+        originalGrayArrays = setData["originalGrayArrays"]
+        # color arrays are also in setData["originalColorArrays"], used for masking
 
-        self.createVolumesFromArrays(originalArrays)
+        self.createVolumesFromGrayArrays(originalGrayArrays)
 
+        # For each masked image, re-create labelVol + maskedVol
         for idx, stateInfo in self.imageStates.items():
             if stateInfo["state"] == "masked" and stateInfo["maskNodes"] is not None:
                 m = stateInfo["maskNodes"]
@@ -447,6 +466,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 slicer.util.updateVolumeFromArray(maskedVol, grayMasked)
                 maskedVol.SetName(os.path.basename(self.imagePaths[idx]) + "_masked")
 
+                # Reconnect in the state dictionary
                 stateInfo["maskNodes"] = {
                     "labelVol": labelVol,
                     "colorNode": colorNode,
@@ -460,9 +480,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.placeBoundingBoxButton.enabled = True
         self.refreshButtonStatesBasedOnCurrentState()
 
-    def createVolumesFromArrays(self, originalArrays):
+    def createVolumesFromGrayArrays(self, grayArrays):
         self.originalVolumes = []
-        for i, arr in enumerate(originalArrays):
+        for i, arr in enumerate(grayArrays):
             volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
             self.createdNodes.append(volumeNode)
             slicer.util.updateVolumeFromArray(volumeNode, arr)
@@ -470,13 +490,17 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.originalVolumes.append(volumeNode)
 
     @staticmethod
-    def loadAndFlipImageToArray(path):
+    def loadImageColorAndGray(path):
+        """
+        Loads the image in color (flipped) and also creates a grayscale array for volume display.
+        Returns (colorArr, grayArr).
+        """
         from PIL import Image
         img = Image.open(path).convert('RGB')
-        arr = np.asarray(img)
-        arr = np.flipud(arr)
-        gray = np.mean(arr, axis=2).astype(np.uint8)
-        return gray
+        colorArr = np.asarray(img)
+        colorArr = np.flipud(colorArr)  # flip vertical to match Slicer orientation
+        grayArr = np.mean(colorArr, axis=2).astype(np.uint8)  # for volume
+        return colorArr, grayArr
 
     def refreshButtonStatesBasedOnCurrentState(self):
         stateInfo = self.imageStates[self.currentImageIndex]
@@ -630,8 +654,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode)
             self.boundingBoxFiducialNode = None
 
-        self.boundingBoxFiducialNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode",
-                                                                          "BoundingBoxPoints")
+        self.boundingBoxFiducialNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsFiducialNode", "BoundingBoxPoints"
+        )
         self.boundingBoxFiducialNode.CreateDefaultDisplayNodes()
         dnode = self.boundingBoxFiducialNode.GetDisplayNode()
         dnode.SetGlyphTypeFromString("Sphere3D")
@@ -643,8 +668,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.boundingBoxFiducialNode.RemoveAllControlPoints()
         self.boundingBoxFiducialNode.RemoveAllObservers()
-        self.boundingBoxFiducialNode.AddObserver(slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
-                                                 self.onBoundingBoxPointPlaced)
+        self.boundingBoxFiducialNode.AddObserver(
+            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.onBoundingBoxPointPlaced
+        )
 
         selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
@@ -706,7 +732,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.updateVolumeDisplay()
 
         self.restoreButtonStates()
-        # In some workflows you might want to re-enable mask button explicitly:
+        # Re-enable mask button if appropriate
         self.maskButton.enabled = True
 
     def computeBboxFromFiducials(self):
@@ -730,7 +756,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         x_max = max(p1_ijk[0], p2_ijk[0])
         y_min = min(p1_ijk[1], p2_ijk[1])
         y_max = max(p1_ijk[1], p2_ijk[1])
-        return x_min, y_min, x_max, y_max
+        return (x_min, y_min, x_max, y_max)
 
     def removeBboxFromCurrentImage(self):
         if self.imageStates.get(self.currentImageIndex):
@@ -760,15 +786,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return
 
         bboxCoords = stateInfo["bboxCoords"]
-        currentOriginal = self.originalVolumes[self.currentImageIndex]
-        arr = slicer.util.arrayFromVolume(currentOriginal)
-        arr = np.squeeze(arr)
-        if arr.ndim == 2:
-            rgbArr = np.stack([arr, arr, arr], axis=-1)
-        else:
-            rgbArr = arr
 
-        mask = self.logic.run_sam_segmentation(rgbArr, bboxCoords)
+        # Retrieve the full color array for SAM
+        colorArr = self.setStates[self.currentSet]["originalColorArrays"][self.currentImageIndex]
+
+        # Run SAM
+        mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
+
+        # Create label volume from mask
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
         labelVol.CreateDefaultDisplayNodes()
         self.createdNodes.append(labelVol)
@@ -783,13 +808,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         colorNode.SetColor(1, "Mask", 1, 0, 0, 1)
         labelVol.GetDisplayNode().SetAndObserveColorNodeID(colorNode.GetID())
 
+        # Create masked volume for grayscale display
         maskedVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
         self.createdNodes.append(maskedVol)
-        masked = rgbArr.copy()
-        masked[mask == 0] = 0
-        grayMasked = np.mean(masked, axis=2).astype(np.uint8)
+        colorMasked = colorArr.copy()
+        colorMasked[mask == 0] = 0
+        grayMasked = np.mean(colorMasked, axis=2).astype(np.uint8)
         slicer.util.updateVolumeFromArray(maskedVol, grayMasked)
-        maskedVol.SetName(currentOriginal.GetName() + "_masked")
+        maskedVol.SetName(self.originalVolumes[self.currentImageIndex].GetName() + "_masked")
 
         stateInfo["state"] = "masked"
         stateInfo["maskNodes"] = {
@@ -802,7 +828,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.removeBboxLines()
         self.processedOnce = True
-        self.saveMaskedImage(self.currentImageIndex, mask)
+
+        # Save final masked color image
+        maskBool = (mask > 0)
+        self.saveMaskedImage(self.currentImageIndex, colorArr, maskBool)
         self.updateVolumeDisplay()
 
     def removeBboxLines(self):
@@ -848,9 +877,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.currentBboxLineNodes.append(lineNode)
 
     def onMaskAllImagesClicked(self):
-        """
-        This function now provides time details (elapsed, remain) as it processes each image.
-        """
         stateInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stateInfo or stateInfo["state"] != "masked" or not stateInfo["bboxCoords"]:
             slicer.util.warningDisplay("Current image is not masked or has no bounding box info.")
@@ -873,24 +899,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         start_time = time.time()
 
         for count, i in enumerate(imagesToMask):
-            # Mark start of iteration
-            iteration_start = time.time()
-
-            # Mask the single image
-            self.maskSingleImage(i, bboxCoords)
-            # Update the progress
             processed = count + 1
-            self.maskAllProgressBar.setValue(processed)
+            self.maskSingleImage(i, bboxCoords)
 
-            # Calculate elapsed time so far
+            self.maskAllProgressBar.setValue(processed)
             elapsed_secs = time.time() - start_time
-            # Average time per image
             avg_per_image = elapsed_secs / processed
-            # Remain time
             remain = avg_per_image * (num_images - processed)
 
             def format_seconds(sec):
-                # Quick helper to format secs as HH:MM:SS
                 sec = int(sec)
                 h = sec // 3600
                 m = (sec % 3600) // 60
@@ -903,7 +920,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             elapsed_str = format_seconds(elapsed_secs)
             remain_str = format_seconds(remain)
 
-            # Set progress bar text
             msg = f"Masking image {processed}/{num_images} | Elapsed: {elapsed_str}, Remain: {remain_str}"
             self.maskAllProgressBar.setFormat(msg)
 
@@ -914,16 +930,18 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateVolumeDisplay()
 
     def maskSingleImage(self, index, bboxCoords):
-        arr = self.setStates[self.currentSet]["originalArrays"][index]
-        rgbArr = np.stack([arr, arr, arr], axis=-1)
-        mask = self.logic.run_sam_segmentation(rgbArr, bboxCoords)
+        # Use color array for SAM
+        colorArr = self.setStates[self.currentSet]["originalColorArrays"][index]
+        mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
 
+        # Create label volume
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
         labelVol.CreateDefaultDisplayNodes()
         self.createdNodes.append(labelVol)
         labelArray = (mask > 0).astype(np.uint8)
         slicer.util.updateVolumeFromArray(labelVol, labelArray)
 
+        # Color node
         colorNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode")
         self.createdNodes.append(colorNode)
         colorNode.SetTypeToUser()
@@ -932,11 +950,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         colorNode.SetColor(1, "Mask", 1, 0, 0, 1)
         labelVol.GetDisplayNode().SetAndObserveColorNodeID(colorNode.GetID())
 
+        # Create masked volume for display
         maskedVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
         self.createdNodes.append(maskedVol)
-        masked = rgbArr.copy()
-        masked[mask == 0] = 0
-        grayMasked = np.mean(masked, axis=2).astype(np.uint8)
+        colorMasked = colorArr.copy()
+        colorMasked[mask == 0] = 0
+        grayMasked = np.mean(colorMasked, axis=2).astype(np.uint8)
         slicer.util.updateVolumeFromArray(maskedVol, grayMasked)
         maskedVol.SetName(os.path.basename(self.imagePaths[index]) + "_masked")
 
@@ -949,27 +968,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "labelArray": labelArray,
             "grayMasked": grayMasked
         }
-        maskBool = (mask > 0)
-        self.saveMaskedImage(index, maskBool)
 
-    def saveMaskedImage(self, index, mask):
+        # Save final masked color image
+        maskBool = (mask > 0)
+        self.saveMaskedImage(index, colorArr, maskBool)
+
+    def saveMaskedImage(self, index, colorArr, maskBool):
         from PIL import Image
         outputFolder = self.outputFolderSelector.directory
         setOutputFolder = os.path.join(outputFolder, self.currentSet)
         os.makedirs(setOutputFolder, exist_ok=True)
 
-        stateInfo = self.imageStates.get(index, None)
-        if (not stateInfo or stateInfo["state"] != "masked" or
-                not stateInfo["maskNodes"]):
-            print("No masked volume available for saving this image.")
-            return
-
-        grayMasked = stateInfo["maskNodes"]["grayMasked"]
-        arr = np.flipud(grayMasked)
-        arr_rgb = np.stack([arr, arr, arr], axis=-1)
+        # Apply mask to colorArr
+        colorMasked = colorArr.copy()
+        colorMasked[~maskBool] = 0  # Where mask is false => zero
+        colorMaskedFlipped = np.flipud(colorMasked)  # flip back for final output
 
         filename = os.path.basename(self.imagePaths[index])
-        Image.fromarray(arr_rgb.astype(np.uint8)).save(os.path.join(setOutputFolder, filename))
+        Image.fromarray(colorMaskedFlipped.astype(np.uint8)).save(
+            os.path.join(setOutputFolder, filename)
+        )
 
     def clearAllCreatedNodes(self):
         for node in self.createdNodes:
@@ -989,6 +1007,8 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         ScriptedLoadableModuleLogic.__init__(self)
         self.predictor = None
         self.sam = None
+        # Check device
+        import torch
         if torch.cuda.is_available():
             self.device = torch.device("cuda:0")
             print("Using CUDA:0")
@@ -1044,12 +1064,17 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
 
     def run_sam_segmentation(self, image_rgb, bounding_box):
         """
-        Run SAM segmentation using the current predictor.
+        Run SAM segmentation using the current predictor on a color array.
+        image_rgb shape => (height, width, 3).
         """
         if not self.predictor:
             raise RuntimeError("SAM model is not loaded. Please load model first.")
-        self.predictor.set_image(image_rgb)
+
         box = np.array(bounding_box, dtype=np.float32)
+
+        # Set image in predictor
+        self.predictor.set_image(image_rgb)
+
         import torch
         with torch.no_grad():
             masks, _, _ = self.predictor.predict(
