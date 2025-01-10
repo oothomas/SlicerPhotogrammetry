@@ -37,7 +37,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Folder processing,
      - Bbox/masking steps,
      - EXIF + color/writing,
-     - Creating _mask.png for webODM
+     - Creating _mask.png for webODM,
+     - And now, an external Find-GCP usage that creates a single combined gcp_list.txt,
+       storing it inside this widget?s memory for future usage.
     """
 
     # ALWAYS ADD EXTERNAL IMPORTS HERE
@@ -116,6 +118,16 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.samVariantCombo = None
         self.loadModelButton = None
         self.modelLoaded = False
+
+        # GCP-related UI elements (since ctkFileButton doesn't exist):
+        self.findGCPScriptSelector = None
+        self.gcpCoordFileSelector = None
+        self.arucoDictIDSpinBox = None
+        self.generateGCPButton = None
+
+        # (NEW) Variables to store after Find-GCP step:
+        self.gcpListContent = ""     # We'll store the entire gcp_list.txt file text here
+        self.gcpCoordFilePath = ""   # We'll store the user-supplied coordinate text file path
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -229,10 +241,46 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             else:
                 btn.enabled = False
 
+        #
+        # WEBODM COLLAPSIBLE BUTTON
+        #
         webODMCollapsibleButton = ctk.ctkCollapsibleButton()
         webODMCollapsibleButton.text = "WebODM Reconstruction"
         self.layout.addWidget(webODMCollapsibleButton)
-        webODMFormLayout = qt.QFormLayout(parametersCollapsibleButton)
+        webODMFormLayout = qt.QFormLayout(webODMCollapsibleButton)
+
+        #
+        # (A) Add new UI for Find-GCP script path (using ctkPathLineEdit)
+        #
+        self.findGCPScriptSelector = ctk.ctkPathLineEdit()
+        self.findGCPScriptSelector.filters = ctk.ctkPathLineEdit().Files
+        self.findGCPScriptSelector.setToolTip("Select path to Find-GCP.py script.")
+        webODMFormLayout.addRow("Find-GCP Script:", self.findGCPScriptSelector)
+
+        #
+        # (B) GCP coordinate file path (required)
+        #
+        self.gcpCoordFileSelector = ctk.ctkPathLineEdit()
+        self.gcpCoordFileSelector.filters = ctk.ctkPathLineEdit().Files
+        self.gcpCoordFileSelector.setToolTip("Select GCP coordinate file (required).")
+        webODMFormLayout.addRow("GCP Coord File:", self.gcpCoordFileSelector)
+
+        #
+        # (C) ArUco dictionary ID (optional override)
+        #
+        self.arucoDictIDSpinBox = qt.QSpinBox()
+        self.arucoDictIDSpinBox.setMinimum(0)
+        self.arucoDictIDSpinBox.setMaximum(99)
+        self.arucoDictIDSpinBox.setValue(2)  # Default to 2 => DICT_4X4_250 (or per your example)
+        webODMFormLayout.addRow("ArUco Dictionary ID:", self.arucoDictIDSpinBox)
+
+        #
+        # (D) Button to generate single GCP file across all sets
+        #
+        self.generateGCPButton = qt.QPushButton("Generate Single Combined GCP File (All Sets)")
+        webODMFormLayout.addWidget(self.generateGCPButton)
+        self.generateGCPButton.connect('clicked(bool)', self.onGenerateGCPClicked)
+        self.generateGCPButton.setEnabled(True)  # can attempt anytime
 
         self.layout.addStretch(1)
 
@@ -622,7 +670,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             if slicer.util.confirmYesNoDisplay(
                     "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"):
                 self.removeMaskFromCurrentImage()
-                # self.startPlacingPoints()
                 self.startPlacingROI()
             else:
                 self.restoreButtonStates()
@@ -630,12 +677,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             if slicer.util.confirmYesNoDisplay(
                     "A bounding box already exists. Creating a new one will remove it. Proceed?"):
                 self.removeBboxFromCurrentImage()
-                # self.startPlacingPoints()
                 self.startPlacingROI()
             else:
                 self.restoreButtonStates()
         elif s == "none":
-            # self.startPlacingPoints()
             self.startPlacingROI()
 
     def storeCurrentButtonStates(self):
@@ -675,7 +720,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
         dnode = self.boundingBoxRoiNode.GetDisplayNode()
         dnode.SetVisibility(True)  # Ensure visibility
-        #dnode.SetLineColor(1, 0, 0)  # Red for ROI visualization
         dnode.SetHandlesInteractive(True)  # Enable interaction handles for editing
 
         # Set up the interaction mode for ROI placement
@@ -832,11 +876,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # --- NEW CODE START ---
         # Convert colorArr => PIL => openCV
-        pil_img = self.Image.fromarray(colorArr)  # flip back for normal orientation
+        pil_img = self.Image.fromarray(colorArr)
         cv_img_bgr = self.pil_to_opencv(pil_img)
 
         # detect ArUco bounding boxes
-        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr)
+        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr, aruco_dict=cv2.aruco.DICT_4X4_250)  # example
 
         if len(marker_outputs) == 0:
             # No markers => use existing single-bbox approach
@@ -953,10 +997,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         for count, i in enumerate(toMask):
             processed = count + 1
-            # --- NEW CODE START ---
-            self.maskSingleImage(i, bbox)  # We'll also do the ArUco logic inside maskSingleImage
-            # --- NEW CODE END ---
-
+            self.maskSingleImage(i, bbox)
             self.maskAllProgressBar.setValue(processed)
             elapsed_secs = time.time() - start_time
             avg = elapsed_secs / processed
@@ -986,34 +1027,27 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setData = self.setStates[self.currentSet]
         colorArr = setData["originalColorArrays"][index]
 
-        # --- NEW CODE START ---
-        # detect aruco first
         from PIL import Image
         import cv2
 
-        pil_img = Image.fromarray(colorArr)  # flip back
+        pil_img = Image.fromarray(colorArr)
         cv_img_bgr = self.pil_to_opencv(pil_img)
-        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr)
+        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr, aruco_dict=cv2.aruco.DICT_4X4_250)
 
         if len(marker_outputs) == 0:
-            # do original single-bbox approach
             mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
         else:
-            # combine boxes
             init_box_np = np.array([bboxCoords[0], bboxCoords[1], bboxCoords[2], bboxCoords[3]])
             all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
             mask_bool = self.segment_with_boxes(colorArr, all_boxes, self.logic.predictor)
             mask = mask_bool.astype(np.uint8)
-        # --- NEW CODE END ---
 
-        # label volume
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
         labelVol.CreateDefaultDisplayNodes()
         self.createdNodes.append(labelVol)
         lbArr = (mask > 0).astype(np.uint8)
         slicer.util.updateVolumeFromArray(labelVol, lbArr)
 
-        # color node
         cNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode")
         self.createdNodes.append(cNode)
         cNode.SetTypeToUser()
@@ -1022,7 +1056,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         cNode.SetColor(1, "Mask", 1, 0, 0, 1)
         labelVol.GetDisplayNode().SetAndObserveColorNodeID(cNode.GetID())
 
-        # masked vol
         maskedVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
         self.createdNodes.append(maskedVol)
         cpy = colorArr.copy()
@@ -1047,8 +1080,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def saveMaskedImage(self, index, colorArr, maskBool):
         """
         Saves:
-          1) The masked color image as PNG, with EXIF if available.
-          2) The corresponding _mask.png for webODM (white=255, black=0).
+          1) The masked color image as PNG/JPG, with EXIF if available (optional).
+          2) The corresponding _mask.jpg for webODM (white=255, black=0).
         """
         from PIL import Image
 
@@ -1062,19 +1095,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         cpy = colorArr.copy()
         cpy[~maskBool] = 0
-        # cpy = np.flipud(cpy)  # flip back
-        # cpy = np.fliplr(cpy)
 
         baseName = os.path.splitext(os.path.basename(self.imagePaths[index]))[0]
-        # colorPngFilename = baseName + ".jpg"
-        # colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
-
-        # colorPil = Image.fromarray(cpy.astype(np.uint8))
-        # if exif_bytes:
-        #     colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
-        # else:
-        #     colorPil.save(colorPngPath, "jpeg")
-
         maskBin = (maskBool.astype(np.uint8) * 255)
         maskBin = np.flipud(maskBin)
         maskBin = np.fliplr(maskBin)
@@ -1135,7 +1157,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def assemble_bboxes(self, initial_box_np, marker_outputs, pad=25):
         """
         Combine user bounding box with marker bounding boxes.
-        Return list of np.array(...) boxes => [ [x_min, y_min, x_max, y_max], ...]
+        Return list of np.array(...) => [ [x_min, y_min, x_max, y_max], ...]
         """
         combined_boxes = [initial_box_np]
         for marker_dict in marker_outputs:
@@ -1168,6 +1190,95 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             combined_mask = np.logical_or(combined_mask, mask_bool)
         return combined_mask
     # --- NEW CODE END ---
+
+    #
+    # ----------------- (C) NEW: Generate Single Combined GCP
+    #
+    def onGenerateGCPClicked(self):
+        """
+        Called when user clicks 'Generate Single Combined GCP File (All Sets)'.
+        We'll gather *all* images from *all* subfolders, call gcp_find.py once
+        with all images appended, and produce a single 'combined_gcp_list.txt'
+        in the main output folder. We store its contents in self.gcpListContent.
+        """
+        import subprocess
+
+        # 1) Check if user has selected a valid script
+        find_gcp_script = self.findGCPScriptSelector.currentPath
+        if not find_gcp_script or not os.path.isfile(find_gcp_script):
+            slicer.util.errorDisplay("Please select a valid Find-GCP.py script path.")
+            return
+
+        # 2) Required GCP file
+        self.gcpCoordFilePath = self.gcpCoordFileSelector.currentPath
+        if not self.gcpCoordFilePath or not os.path.isfile(self.gcpCoordFilePath):
+            slicer.util.errorDisplay("Please select a valid GCP coordinate file (required).")
+            return
+
+        # 3) Prepare combined output file
+        outputFolder = self.outputFolderSelector.directory
+        if not outputFolder or not os.path.isdir(outputFolder):
+            slicer.util.errorDisplay("Please select a valid output folder.")
+            return
+
+        combinedOutputFile = os.path.join(outputFolder, "combined_gcp_list.txt")
+
+        # 4) Gather all images from all subfolders
+        masterFolderPath = self.masterFolderSelector.directory
+        if not masterFolderPath or not os.path.isdir(masterFolderPath):
+            slicer.util.errorDisplay("Please select a valid master folder.")
+            return
+
+        subfolders = [f for f in os.listdir(masterFolderPath) if os.path.isdir(os.path.join(masterFolderPath, f))]
+        allImages = []
+        for sf in subfolders:
+            subFolderPath = os.path.join(masterFolderPath, sf)
+            imgs = self.logic.get_image_paths_from_folder(subFolderPath)
+            allImages.extend(imgs)
+
+        if len(allImages) == 0:
+            slicer.util.warningDisplay("No images found in any subfolder. Nothing to do.")
+            return
+
+        # 5) Construct the command
+        # Example usage from your snippet:
+        # python Find-GCP/gcp_find.py -t ODM -d 2 -i gcp_coord.txt --epsg 3857 --minrate 0.01 --ignore 0.33
+        #     -o gcp_list.txt [all images...]
+        dict_id = self.arucoDictIDSpinBox.value
+        cmd = [
+            sys.executable,
+            find_gcp_script,
+            "-t", "ODM",
+            "-d", str(dict_id),
+            "-i", self.gcpCoordFilePath,
+            "--epsg", "3857",
+            "--minrate", "0.01",
+            "--ignore", "0.33",
+            "-o", combinedOutputFile
+        ]
+        cmd += allImages
+
+        # 6) Run it
+        try:
+            slicer.util.infoDisplay("Running Find-GCP to produce a combined gcp_list.txt...")
+            subprocess.run(cmd, check=True)
+
+            # 7) Read the produced combined file into memory
+            if os.path.isfile(combinedOutputFile):
+                with open(combinedOutputFile, "r") as f:
+                    self.gcpListContent = f.read()
+
+                slicer.util.infoDisplay(
+                    f"Combined GCP list created successfully at:\n{combinedOutputFile}",
+                    autoCloseMsec=3500
+                )
+            else:
+                slicer.util.warningDisplay(f"Find-GCP did not produce the file:\n{combinedOutputFile}")
+
+        except subprocess.CalledProcessError as e:
+            slicer.util.warningDisplay(f"Find-GCP failed (CalledProcessError): {str(e)}")
+        except Exception as e:
+            slicer.util.warningDisplay(f"An error occurred running Find-GCP: {str(e)}")
 
 
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
