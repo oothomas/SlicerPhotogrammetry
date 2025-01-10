@@ -39,6 +39,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - EXIF + color/writing,
      - Creating _mask.png for webODM
     """
+
     # ALWAYS ADD EXTERNAL IMPORTS HERE
     ##############################################################
     # EXIF helper: read/write using Pillow
@@ -50,11 +51,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         slicer.util.pip_install("Pillow")
         from PIL import Image
         from PIL.ExifTags import TAGS
-        
+
     try:
         import cv2
     except ImportError:
         slicer.util.pip_install("opencv-python")
+        slicer.util.pip_install("opencv-contrib-python")
         import cv2
 
     try:
@@ -128,9 +130,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # 1) SAM variant
         self.samVariantCombo = qt.QComboBox()
-        self.samVariantCombo.addItem("ViT-base (~376 MB)")    # => "vit_b"
+        self.samVariantCombo.addItem("ViT-base (~376 MB)")  # => "vit_b"
         self.samVariantCombo.addItem("ViT-large (~1.03 GB)")  # => "vit_l"
-        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")   # => "vit_h"
+        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")  # => "vit_h"
         parametersFormLayout.addRow("SAM Variant:", self.samVariantCombo)
 
         # 2) Load Model
@@ -494,6 +496,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         im_rgb = im.convert('RGB')
         colorArr = np.asarray(im_rgb)
         colorArr = np.flipud(colorArr)
+        colorArr = np.fliplr(colorArr)
         grayArr = np.mean(colorArr, axis=2).astype(np.uint8)
         return colorArr, grayArr, exif_bytes
 
@@ -781,7 +784,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setData = self.setStates[self.currentSet]
         colorArr = setData["originalColorArrays"][self.currentImageIndex]
 
-        mask = self.logic.run_sam_segmentation(colorArr, bbox)
+        # --- NEW CODE START ---
+        # Convert colorArr => PIL => openCV
+        pil_img = self.Image.fromarray(colorArr)  # flip back for normal orientation
+        cv_img_bgr = self.pil_to_opencv(pil_img)
+
+        # detect ArUco bounding boxes
+        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr)
+
+        if len(marker_outputs) == 0:
+            # No markers => use existing single-bbox approach
+            mask = self.logic.run_sam_segmentation(colorArr, bbox)
+        else:
+            # Combine user bounding box + marker boxes => multi-bbox approach
+            init_box_np = np.array([bbox[0], bbox[1], bbox[2], bbox[3]])
+            all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
+            mask_bool = self.segment_with_boxes(colorArr, all_boxes, self.logic.predictor)
+            mask = mask_bool.astype(np.uint8)
+        # --- NEW CODE END ---
 
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
         labelVol.CreateDefaultDisplayNodes()
@@ -872,7 +892,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         bbox = stInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
         self.maskAllProgressBar.setTextVisible(True)
-        toMask = [i for i in range(len(self.imagePaths)) if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
+        toMask = [i for i in range(len(self.imagePaths)) if
+                  i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
         n = len(toMask)
         self.maskAllProgressBar.setRange(0, n)
         self.maskAllProgressBar.setValue(0)
@@ -886,7 +907,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         for count, i in enumerate(toMask):
             processed = count + 1
-            self.maskSingleImage(i, bbox)
+            # --- NEW CODE START ---
+            self.maskSingleImage(i, bbox)  # We'll also do the ArUco logic inside maskSingleImage
+            # --- NEW CODE END ---
+
             self.maskAllProgressBar.setValue(processed)
             elapsed_secs = time.time() - start_time
             avg = elapsed_secs / processed
@@ -915,7 +939,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def maskSingleImage(self, index, bboxCoords):
         setData = self.setStates[self.currentSet]
         colorArr = setData["originalColorArrays"][index]
-        mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
+
+        # --- NEW CODE START ---
+        # detect aruco first
+        from PIL import Image
+        import cv2
+
+        pil_img = Image.fromarray(colorArr)  # flip back
+        cv_img_bgr = self.pil_to_opencv(pil_img)
+        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr)
+
+        if len(marker_outputs) == 0:
+            # do original single-bbox approach
+            mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
+        else:
+            # combine boxes
+            init_box_np = np.array([bboxCoords[0], bboxCoords[1], bboxCoords[2], bboxCoords[3]])
+            all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
+            mask_bool = self.segment_with_boxes(colorArr, all_boxes, self.logic.predictor)
+            mask = mask_bool.astype(np.uint8)
+        # --- NEW CODE END ---
 
         # label volume
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
@@ -963,7 +1006,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         """
         from PIL import Image
 
-        # Retrieve exif from setStates if present
         setData = self.setStates[self.currentSet]
         exifList = setData.get("exifData", [])
         exif_bytes = exifList[index] if index < len(exifList) else b""
@@ -972,28 +1014,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setOutputFolder = os.path.join(outputFolder, self.currentSet)
         os.makedirs(setOutputFolder, exist_ok=True)
 
-        # color masked
         cpy = colorArr.copy()
         cpy[~maskBool] = 0
-        cpy = np.flipud(cpy)  # flip back
+        # cpy = np.flipud(cpy)  # flip back
+        # cpy = np.fliplr(cpy)
 
-        # Save color PNG
         baseName = os.path.splitext(os.path.basename(self.imagePaths[index]))[0]
-        colorPngFilename = baseName + ".jpeg"
-        colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
+        # colorPngFilename = baseName + ".jpg"
+        # colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
 
-        colorPil = Image.fromarray(cpy.astype(np.uint8))
-        if exif_bytes:
-            colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
-        else:
-            colorPil.save(colorPngPath, "jpeg")
+        # colorPil = Image.fromarray(cpy.astype(np.uint8))
+        # if exif_bytes:
+        #     colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
+        # else:
+        #     colorPil.save(colorPngPath, "jpeg")
 
-        # Save the binary mask => baseName_mask.png
-        # White=255 => object, black=0 => background
         maskBin = (maskBool.astype(np.uint8) * 255)
-        maskBin = np.flipud(maskBin)  # match final orientation
+        maskBin = np.flipud(maskBin)
+        maskBin = np.fliplr(maskBin)
         maskPil = Image.fromarray(maskBin, mode='L')
-        maskFilename = f"{baseName}_mask.jpeg"
+        maskFilename = f"{baseName}_mask.jpg"
         maskPath = os.path.join(setOutputFolder, maskFilename)
         maskPil.save(maskPath, "jpeg")
 
@@ -1008,6 +1048,80 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def cleanup(self):
         self.saveCurrentSetState()
         self.clearAllCreatedNodes()
+
+    # --- NEW CODE START ---
+    # Additional methods for ArUco + multi-bbox segmentation
+    def pil_to_opencv(self, pil_image):
+        """Convert a PIL Image to an OpenCV BGR NumPy array."""
+        import cv2
+        cv_image = np.array(pil_image)
+        if cv_image.ndim == 2:  # grayscale
+            return cv_image
+        elif cv_image.shape[2] == 4:  # RGBA -> BGR
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
+        else:  # RGB -> BGR
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+        return cv_image
+
+    def detect_aruco_bounding_boxes(self, cv_img, aruco_dict=cv2.aruco.DICT_4X4_50):
+        """
+        Detect ArUco markers in an OpenCV image (BGR).
+        Return a list of dicts: { "marker_id": int, "bbox": (x_min, y_min, x_max, y_max) }
+        """
+        import cv2
+
+        dictionary = cv2.aruco.getPredefinedDictionary(aruco_dict)
+        corners, ids, rejected = cv2.aruco.detectMarkers(cv_img, dictionary)
+        bounding_boxes = []
+        if ids is not None:
+            for i in range(len(ids)):
+                pts = corners[i][0]  # shape (4,2)
+                x_coords = pts[:, 0]
+                y_coords = pts[:, 1]
+                x_min, x_max = int(x_coords.min()), int(x_coords.max())
+                y_min, y_max = int(y_coords.min()), int(y_coords.max())
+                bounding_boxes.append({
+                    "marker_id": int(ids[i]),
+                    "bbox": (x_min, y_min, x_max, y_max)
+                })
+        return bounding_boxes
+
+    def assemble_bboxes(self, initial_box_np, marker_outputs, pad=25):
+        """
+        Combine user bounding box with marker bounding boxes.
+        Return list of np.array(...) boxes => [ [x_min, y_min, x_max, y_max], ...]
+        """
+        combined_boxes = [initial_box_np]
+        for marker_dict in marker_outputs:
+            x_min, y_min, x_max, y_max = marker_dict["bbox"]
+            x_min_new = x_min - pad
+            y_min_new = y_min - pad
+            x_max_new = x_max + pad
+            y_max_new = y_max + pad
+            combined_boxes.append(np.array([x_min_new, y_min_new, x_max_new, y_max_new]))
+        return combined_boxes
+
+    def segment_with_boxes(self, image_rgb, boxes, predictor):
+        """
+        For each bounding box in 'boxes', run SAM, then OR all results into one mask.
+        Return final combined_mask as a bool array => shape (H, W).
+        """
+        import torch
+        predictor.set_image(image_rgb)
+        h, w, _ = image_rgb.shape
+        combined_mask = np.zeros((h, w), dtype=bool)
+        for box in boxes:
+            with torch.no_grad():
+                masks, scores, logits = predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=box,
+                    multimask_output=False
+                )
+            mask_bool = masks[0].astype(bool)
+            combined_mask = np.logical_or(combined_mask, mask_bool)
+        return combined_mask
+    # --- NEW CODE END ---
 
 
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
