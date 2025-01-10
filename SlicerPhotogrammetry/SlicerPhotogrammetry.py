@@ -39,6 +39,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - EXIF + color/writing,
      - Creating _mask.png for webODM
     """
+
     # ALWAYS ADD EXTERNAL IMPORTS HERE
     ##############################################################
     # EXIF helper: read/write using Pillow
@@ -50,11 +51,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         slicer.util.pip_install("Pillow")
         from PIL import Image
         from PIL.ExifTags import TAGS
-        
+
     try:
         import cv2
     except ImportError:
         slicer.util.pip_install("opencv-python")
+        slicer.util.pip_install("opencv-contrib-python")
         import cv2
 
     try:
@@ -90,7 +92,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageStates = {}
         self.createdNodes = []
         self.currentBboxLineNodes = []
-        self.boundingBoxFiducialNode = None
+        self.boundingBoxRoiNode = None
         self.placingBoundingBox = False
 
         # UI
@@ -128,9 +130,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # 1) SAM variant
         self.samVariantCombo = qt.QComboBox()
-        self.samVariantCombo.addItem("ViT-base (~376 MB)")    # => "vit_b"
+        self.samVariantCombo.addItem("ViT-base (~376 MB)")  # => "vit_b"
         self.samVariantCombo.addItem("ViT-large (~1.03 GB)")  # => "vit_l"
-        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")   # => "vit_h"
+        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")  # => "vit_h"
         parametersFormLayout.addRow("SAM Variant:", self.samVariantCombo)
 
         # 2) Load Model
@@ -140,11 +142,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # 3) Master/Output
         self.masterFolderSelector = ctk.ctkDirectoryButton()
-        self.masterFolderSelector.directory = ""
+        savedMasterFolder = slicer.app.settings().value("SlicerPhotogrammetry/masterFolderPath", "")
+        if os.path.isdir(savedMasterFolder):
+            self.masterFolderSelector.directory = savedMasterFolder
         parametersFormLayout.addRow("Master Folder:", self.masterFolderSelector)
 
         self.outputFolderSelector = ctk.ctkDirectoryButton()
-        self.outputFolderSelector.directory = ""
+        savedOutputFolder = slicer.app.settings().value("SlicerPhotogrammetry/outputFolderPath", "")
+        if os.path.isdir(savedOutputFolder):
+            self.outputFolderSelector.directory = savedOutputFolder
         parametersFormLayout.addRow("Output Folder:", self.outputFolderSelector)
 
         # 4) Process Folders
@@ -222,6 +228,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 btn.setEnabled(False)
             else:
                 btn.enabled = False
+
+        webODMCollapsibleButton = ctk.ctkCollapsibleButton()
+        webODMCollapsibleButton.text = "WebODM Reconstruction"
+        self.layout.addWidget(webODMCollapsibleButton)
+        webODMFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
         self.layout.addStretch(1)
 
@@ -304,6 +315,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if not os.path.isdir(outputFolderPath):
             slicer.util.errorDisplay("Please select a valid output folder.")
             return
+
+        # Save the paths in Slicer's settings
+        slicer.app.settings().setValue("SlicerPhotogrammetry/masterFolderPath", masterFolderPath)
+        slicer.app.settings().setValue("SlicerPhotogrammetry/outputFolderPath", outputFolderPath)
 
         self.processFoldersProgressBar.setVisible(True)
         self.processFoldersProgressBar.setValue(0)
@@ -494,6 +509,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         im_rgb = im.convert('RGB')
         colorArr = np.asarray(im_rgb)
         colorArr = np.flipud(colorArr)
+        colorArr = np.fliplr(colorArr)
         grayArr = np.mean(colorArr, axis=2).astype(np.uint8)
         return colorArr, grayArr, exif_bytes
 
@@ -606,18 +622,21 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             if slicer.util.confirmYesNoDisplay(
                     "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"):
                 self.removeMaskFromCurrentImage()
-                self.startPlacingPoints()
+                # self.startPlacingPoints()
+                self.startPlacingROI()
             else:
                 self.restoreButtonStates()
         elif s == "bbox":
             if slicer.util.confirmYesNoDisplay(
                     "A bounding box already exists. Creating a new one will remove it. Proceed?"):
                 self.removeBboxFromCurrentImage()
-                self.startPlacingPoints()
+                # self.startPlacingPoints()
+                self.startPlacingROI()
             else:
                 self.restoreButtonStates()
         elif s == "none":
-            self.startPlacingPoints()
+            # self.startPlacingPoints()
+            self.startPlacingROI()
 
     def storeCurrentButtonStates(self):
         self.previousButtonStates = {}
@@ -642,68 +661,95 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 else:
                     b.enabled = False
 
-    def startPlacingPoints(self):
+    def startPlacingROI(self):
+        # Remove any existing bounding box lines or ROI nodes
         self.removeBboxLines()
-        if self.boundingBoxFiducialNode:
-            slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode)
-            self.boundingBoxFiducialNode = None
+        if self.boundingBoxRoiNode:
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+            self.boundingBoxRoiNode = None
 
-        self.boundingBoxFiducialNode = slicer.mrmlScene.AddNewNodeByClass(
-            "vtkMRMLMarkupsFiducialNode", "BoundingBoxPoints"
+        # Create a new ROI node
+        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsROINode", "BoundingBoxROI"
         )
-        self.boundingBoxFiducialNode.CreateDefaultDisplayNodes()
-        dnode = self.boundingBoxFiducialNode.GetDisplayNode()
-        dnode.SetGlyphTypeFromString("Sphere3D")
-        dnode.SetUseGlyphScale(False)
-        dnode.SetGlyphSize(5.0)
-        dnode.SetSelectedColor(1, 0, 0)
-        dnode.SetVisibility(True)
-        dnode.SetPointLabelsVisibility(True)
+        self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetVisibility(True)  # Ensure visibility
+        #dnode.SetLineColor(1, 0, 0)  # Red for ROI visualization
+        dnode.SetHandlesInteractive(True)  # Enable interaction handles for editing
 
-        self.boundingBoxFiducialNode.RemoveAllControlPoints()
-        self.boundingBoxFiducialNode.RemoveAllObservers()
-        self.boundingBoxFiducialNode.AddObserver(
-            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.onBoundingBoxPointPlaced
-        )
-
+        # Set up the interaction mode for ROI placement
         selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
-        selectionNode.SetActivePlaceNodeID(self.boundingBoxFiducialNode.GetID())
-        interactionNode.SetPlaceModePersistence(1)
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsROINode")
+        selectionNode.SetActivePlaceNodeID(self.boundingBoxRoiNode.GetID())
+        interactionNode.SetPlaceModePersistence(1)  # Stay in place mode during placement
         interactionNode.SetCurrentInteractionMode(interactionNode.Place)
 
-        self.doneButton.enabled = False
+        # Listen for ROI placement completion
+        self.boundingBoxRoiNode.AddObserver(
+            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.checkROIPlacementComplete
+        )
+
+        # Provide user instructions via tooltip
+        slicer.util.infoDisplay(
+            "Draw the ROI and use the handles to adjust it. Click 'Done' when satisfied.",
+            autoCloseMsec=5000
+        )
+
+        # Enable "Done" button; disable "Mask" button
+        self.doneButton.enabled = True
         self.maskButton.enabled = False
 
-    def onBoundingBoxPointPlaced(self, caller, event):
-        nPoints = self.boundingBoxFiducialNode.GetNumberOfDefinedControlPoints()
-        if nPoints == 2:
-            slicer.util.infoDisplay("Two points placed. Click 'Done' to confirm bounding box.")
-            self.disablePointSelection()
-            self.doneButton.enabled = True
-
-    @staticmethod
-    def disablePointSelection():
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-        interactionNode.SetPlaceModePersistence(0)
-
-    def onDoneClicked(self):
-        if not self.boundingBoxFiducialNode or self.boundingBoxFiducialNode.GetNumberOfDefinedControlPoints() < 2:
-            slicer.util.warningDisplay("You must place two points first.")
+    def checkROIPlacementComplete(self, caller, event):
+        if not self.boundingBoxRoiNode:
             return
 
-        coords = self.computeBboxFromFiducials()
+        # Check if the ROI placement is complete
+        if self.boundingBoxRoiNode.GetControlPointPlacementComplete():
+            # Exit place mode and switch to View Transform mode
+            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+            interactionNode.SetPlaceModePersistence(0)  # Stop place mode
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)  # Enable view/edit mode
+
+            # Provide user feedback
+            slicer.util.infoDisplay(
+                "ROI placement complete. You can now edit the ROI using the handles or click 'Done' to finalize.",
+                autoCloseMsec=4000
+            )
+
+    def onDoneClicked(self):
+        if not self.boundingBoxRoiNode:
+            slicer.util.warningDisplay("You must place an ROI first.")
+            return
+
+        # Compute the bounding box from the ROI
+        coords = self.computeBboxFromROI()
         self.imageStates[self.currentImageIndex]["state"] = "bbox"
         self.imageStates[self.currentImageIndex]["bboxCoords"] = coords
         self.imageStates[self.currentImageIndex]["maskNodes"] = None
 
-        if self.boundingBoxFiducialNode.GetDisplayNode():
-            slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode.GetDisplayNode())
-        slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode)
-        self.boundingBoxFiducialNode = None
+        # Disable interaction handles after ROI placement is confirmed
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetHandlesInteractive(False)  # Disable handles for editing
 
+        # Exit place mode
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetPlaceModePersistence(0)  # Exit place mode
+        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)  # Switch to view transform
+
+        slicer.util.infoDisplay(
+            "ROI placement finalized. You can now proceed with masking or further actions.",
+            autoCloseMsec=4000
+        )
+
+        # Remove the ROI node (clean up after confirming placement)
+        if self.boundingBoxRoiNode.GetDisplayNode():
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
+        slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+        self.boundingBoxRoiNode = None
+
+        # Update button states
         self.doneButton.enabled = False
         self.maskButton.enabled = True
         self.updateVolumeDisplay()
@@ -723,14 +769,17 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.currentImageIndex = origI
             self.updateVolumeDisplay()
 
+        # Restore button states
         self.restoreButtonStates()
         self.maskButton.enabled = True
 
-    def computeBboxFromFiducials(self):
-        p1 = [0.0, 0.0, 0.0]
-        p2 = [0.0, 0.0, 0.0]
-        self.boundingBoxFiducialNode.GetNthControlPointPositionWorld(0, p1)
-        self.boundingBoxFiducialNode.GetNthControlPointPositionWorld(1, p2)
+    def computeBboxFromROI(self):
+        roiBounds = [0] * 6
+        self.boundingBoxRoiNode.GetBounds(roiBounds)
+
+        # Get upper-left and lower-right points (ROI bounds)
+        p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]  # Xmin, Ymin, Zmin
+        p2 = [roiBounds[1], roiBounds[3], roiBounds[4]]  # Xmax, Ymax, Zmin (assuming 2D plane)
 
         vol = self.originalVolumes[self.currentImageIndex]
         rasToIjkMat = vtk.vtkMatrix4x4()
@@ -781,7 +830,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setData = self.setStates[self.currentSet]
         colorArr = setData["originalColorArrays"][self.currentImageIndex]
 
-        mask = self.logic.run_sam_segmentation(colorArr, bbox)
+        # --- NEW CODE START ---
+        # Convert colorArr => PIL => openCV
+        pil_img = self.Image.fromarray(colorArr)  # flip back for normal orientation
+        cv_img_bgr = self.pil_to_opencv(pil_img)
+
+        # detect ArUco bounding boxes
+        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr)
+
+        if len(marker_outputs) == 0:
+            # No markers => use existing single-bbox approach
+            mask = self.logic.run_sam_segmentation(colorArr, bbox)
+        else:
+            # Combine user bounding box + marker boxes => multi-bbox approach
+            init_box_np = np.array([bbox[0], bbox[1], bbox[2], bbox[3]])
+            all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
+            mask_bool = self.segment_with_boxes(colorArr, all_boxes, self.logic.predictor)
+            mask = mask_bool.astype(np.uint8)
+        # --- NEW CODE END ---
 
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
         labelVol.CreateDefaultDisplayNodes()
@@ -872,7 +938,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         bbox = stInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
         self.maskAllProgressBar.setTextVisible(True)
-        toMask = [i for i in range(len(self.imagePaths)) if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
+        toMask = [i for i in range(len(self.imagePaths)) if
+                  i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
         n = len(toMask)
         self.maskAllProgressBar.setRange(0, n)
         self.maskAllProgressBar.setValue(0)
@@ -886,7 +953,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         for count, i in enumerate(toMask):
             processed = count + 1
-            self.maskSingleImage(i, bbox)
+            # --- NEW CODE START ---
+            self.maskSingleImage(i, bbox)  # We'll also do the ArUco logic inside maskSingleImage
+            # --- NEW CODE END ---
+
             self.maskAllProgressBar.setValue(processed)
             elapsed_secs = time.time() - start_time
             avg = elapsed_secs / processed
@@ -915,7 +985,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def maskSingleImage(self, index, bboxCoords):
         setData = self.setStates[self.currentSet]
         colorArr = setData["originalColorArrays"][index]
-        mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
+
+        # --- NEW CODE START ---
+        # detect aruco first
+        from PIL import Image
+        import cv2
+
+        pil_img = Image.fromarray(colorArr)  # flip back
+        cv_img_bgr = self.pil_to_opencv(pil_img)
+        marker_outputs = self.detect_aruco_bounding_boxes(cv_img_bgr)
+
+        if len(marker_outputs) == 0:
+            # do original single-bbox approach
+            mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
+        else:
+            # combine boxes
+            init_box_np = np.array([bboxCoords[0], bboxCoords[1], bboxCoords[2], bboxCoords[3]])
+            all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
+            mask_bool = self.segment_with_boxes(colorArr, all_boxes, self.logic.predictor)
+            mask = mask_bool.astype(np.uint8)
+        # --- NEW CODE END ---
 
         # label volume
         labelVol = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
@@ -963,7 +1052,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         """
         from PIL import Image
 
-        # Retrieve exif from setStates if present
         setData = self.setStates[self.currentSet]
         exifList = setData.get("exifData", [])
         exif_bytes = exifList[index] if index < len(exifList) else b""
@@ -972,28 +1060,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setOutputFolder = os.path.join(outputFolder, self.currentSet)
         os.makedirs(setOutputFolder, exist_ok=True)
 
-        # color masked
         cpy = colorArr.copy()
         cpy[~maskBool] = 0
-        cpy = np.flipud(cpy)  # flip back
+        # cpy = np.flipud(cpy)  # flip back
+        # cpy = np.fliplr(cpy)
 
-        # Save color PNG
         baseName = os.path.splitext(os.path.basename(self.imagePaths[index]))[0]
-        colorPngFilename = baseName + ".jpeg"
-        colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
+        # colorPngFilename = baseName + ".jpg"
+        # colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
 
-        colorPil = Image.fromarray(cpy.astype(np.uint8))
-        if exif_bytes:
-            colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
-        else:
-            colorPil.save(colorPngPath, "jpeg")
+        # colorPil = Image.fromarray(cpy.astype(np.uint8))
+        # if exif_bytes:
+        #     colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
+        # else:
+        #     colorPil.save(colorPngPath, "jpeg")
 
-        # Save the binary mask => baseName_mask.png
-        # White=255 => object, black=0 => background
         maskBin = (maskBool.astype(np.uint8) * 255)
-        maskBin = np.flipud(maskBin)  # match final orientation
+        maskBin = np.flipud(maskBin)
+        maskBin = np.fliplr(maskBin)
         maskPil = Image.fromarray(maskBin, mode='L')
-        maskFilename = f"{baseName}_mask.jpeg"
+        maskFilename = f"{baseName}_mask.jpg"
         maskPath = os.path.join(setOutputFolder, maskFilename)
         maskPil.save(maskPath, "jpeg")
 
@@ -1008,6 +1094,80 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def cleanup(self):
         self.saveCurrentSetState()
         self.clearAllCreatedNodes()
+
+    # --- NEW CODE START ---
+    # Additional methods for ArUco + multi-bbox segmentation
+    def pil_to_opencv(self, pil_image):
+        """Convert a PIL Image to an OpenCV BGR NumPy array."""
+        import cv2
+        cv_image = np.array(pil_image)
+        if cv_image.ndim == 2:  # grayscale
+            return cv_image
+        elif cv_image.shape[2] == 4:  # RGBA -> BGR
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
+        else:  # RGB -> BGR
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+        return cv_image
+
+    def detect_aruco_bounding_boxes(self, cv_img, aruco_dict=cv2.aruco.DICT_4X4_50):
+        """
+        Detect ArUco markers in an OpenCV image (BGR).
+        Return a list of dicts: { "marker_id": int, "bbox": (x_min, y_min, x_max, y_max) }
+        """
+        import cv2
+
+        dictionary = cv2.aruco.getPredefinedDictionary(aruco_dict)
+        corners, ids, rejected = cv2.aruco.detectMarkers(cv_img, dictionary)
+        bounding_boxes = []
+        if ids is not None:
+            for i in range(len(ids)):
+                pts = corners[i][0]  # shape (4,2)
+                x_coords = pts[:, 0]
+                y_coords = pts[:, 1]
+                x_min, x_max = int(x_coords.min()), int(x_coords.max())
+                y_min, y_max = int(y_coords.min()), int(y_coords.max())
+                bounding_boxes.append({
+                    "marker_id": int(ids[i]),
+                    "bbox": (x_min, y_min, x_max, y_max)
+                })
+        return bounding_boxes
+
+    def assemble_bboxes(self, initial_box_np, marker_outputs, pad=25):
+        """
+        Combine user bounding box with marker bounding boxes.
+        Return list of np.array(...) boxes => [ [x_min, y_min, x_max, y_max], ...]
+        """
+        combined_boxes = [initial_box_np]
+        for marker_dict in marker_outputs:
+            x_min, y_min, x_max, y_max = marker_dict["bbox"]
+            x_min_new = x_min - pad
+            y_min_new = y_min - pad
+            x_max_new = x_max + pad
+            y_max_new = y_max + pad
+            combined_boxes.append(np.array([x_min_new, y_min_new, x_max_new, y_max_new]))
+        return combined_boxes
+
+    def segment_with_boxes(self, image_rgb, boxes, predictor):
+        """
+        For each bounding box in 'boxes', run SAM, then OR all results into one mask.
+        Return final combined_mask as a bool array => shape (H, W).
+        """
+        import torch
+        predictor.set_image(image_rgb)
+        h, w, _ = image_rgb.shape
+        combined_mask = np.zeros((h, w), dtype=bool)
+        for box in boxes:
+            with torch.no_grad():
+                masks, scores, logits = predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=box,
+                    multimask_output=False
+                )
+            mask_bool = masks[0].astype(bool)
+            combined_mask = np.logical_or(combined_mask, mask_bool)
+        return combined_mask
+    # --- NEW CODE END ---
 
 
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
