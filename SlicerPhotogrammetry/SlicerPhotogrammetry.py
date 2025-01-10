@@ -92,7 +92,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageStates = {}
         self.createdNodes = []
         self.currentBboxLineNodes = []
-        self.boundingBoxFiducialNode = None
+        self.boundingBoxRoiNode = None
         self.placingBoundingBox = False
 
         # UI
@@ -142,11 +142,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # 3) Master/Output
         self.masterFolderSelector = ctk.ctkDirectoryButton()
-        self.masterFolderSelector.directory = ""
+        savedMasterFolder = slicer.app.settings().value("SlicerPhotogrammetry/masterFolderPath", "")
+        if os.path.isdir(savedMasterFolder):
+            self.masterFolderSelector.directory = savedMasterFolder
         parametersFormLayout.addRow("Master Folder:", self.masterFolderSelector)
 
         self.outputFolderSelector = ctk.ctkDirectoryButton()
-        self.outputFolderSelector.directory = ""
+        savedOutputFolder = slicer.app.settings().value("SlicerPhotogrammetry/outputFolderPath", "")
+        if os.path.isdir(savedOutputFolder):
+            self.outputFolderSelector.directory = savedOutputFolder
         parametersFormLayout.addRow("Output Folder:", self.outputFolderSelector)
 
         # 4) Process Folders
@@ -224,6 +228,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 btn.setEnabled(False)
             else:
                 btn.enabled = False
+
+        webODMCollapsibleButton = ctk.ctkCollapsibleButton()
+        webODMCollapsibleButton.text = "WebODM Reconstruction"
+        self.layout.addWidget(webODMCollapsibleButton)
+        webODMFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
         self.layout.addStretch(1)
 
@@ -306,6 +315,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if not os.path.isdir(outputFolderPath):
             slicer.util.errorDisplay("Please select a valid output folder.")
             return
+
+        # Save the paths in Slicer's settings
+        slicer.app.settings().setValue("SlicerPhotogrammetry/masterFolderPath", masterFolderPath)
+        slicer.app.settings().setValue("SlicerPhotogrammetry/outputFolderPath", outputFolderPath)
 
         self.processFoldersProgressBar.setVisible(True)
         self.processFoldersProgressBar.setValue(0)
@@ -609,18 +622,21 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             if slicer.util.confirmYesNoDisplay(
                     "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"):
                 self.removeMaskFromCurrentImage()
-                self.startPlacingPoints()
+                # self.startPlacingPoints()
+                self.startPlacingROI()
             else:
                 self.restoreButtonStates()
         elif s == "bbox":
             if slicer.util.confirmYesNoDisplay(
                     "A bounding box already exists. Creating a new one will remove it. Proceed?"):
                 self.removeBboxFromCurrentImage()
-                self.startPlacingPoints()
+                # self.startPlacingPoints()
+                self.startPlacingROI()
             else:
                 self.restoreButtonStates()
         elif s == "none":
-            self.startPlacingPoints()
+            # self.startPlacingPoints()
+            self.startPlacingROI()
 
     def storeCurrentButtonStates(self):
         self.previousButtonStates = {}
@@ -645,68 +661,95 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 else:
                     b.enabled = False
 
-    def startPlacingPoints(self):
+    def startPlacingROI(self):
+        # Remove any existing bounding box lines or ROI nodes
         self.removeBboxLines()
-        if self.boundingBoxFiducialNode:
-            slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode)
-            self.boundingBoxFiducialNode = None
+        if self.boundingBoxRoiNode:
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+            self.boundingBoxRoiNode = None
 
-        self.boundingBoxFiducialNode = slicer.mrmlScene.AddNewNodeByClass(
-            "vtkMRMLMarkupsFiducialNode", "BoundingBoxPoints"
+        # Create a new ROI node
+        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsROINode", "BoundingBoxROI"
         )
-        self.boundingBoxFiducialNode.CreateDefaultDisplayNodes()
-        dnode = self.boundingBoxFiducialNode.GetDisplayNode()
-        dnode.SetGlyphTypeFromString("Sphere3D")
-        dnode.SetUseGlyphScale(False)
-        dnode.SetGlyphSize(5.0)
-        dnode.SetSelectedColor(1, 0, 0)
-        dnode.SetVisibility(True)
-        dnode.SetPointLabelsVisibility(True)
+        self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetVisibility(True)  # Ensure visibility
+        #dnode.SetLineColor(1, 0, 0)  # Red for ROI visualization
+        dnode.SetHandlesInteractive(True)  # Enable interaction handles for editing
 
-        self.boundingBoxFiducialNode.RemoveAllControlPoints()
-        self.boundingBoxFiducialNode.RemoveAllObservers()
-        self.boundingBoxFiducialNode.AddObserver(
-            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.onBoundingBoxPointPlaced
-        )
-
+        # Set up the interaction mode for ROI placement
         selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
-        selectionNode.SetActivePlaceNodeID(self.boundingBoxFiducialNode.GetID())
-        interactionNode.SetPlaceModePersistence(1)
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsROINode")
+        selectionNode.SetActivePlaceNodeID(self.boundingBoxRoiNode.GetID())
+        interactionNode.SetPlaceModePersistence(1)  # Stay in place mode during placement
         interactionNode.SetCurrentInteractionMode(interactionNode.Place)
 
-        self.doneButton.enabled = False
+        # Listen for ROI placement completion
+        self.boundingBoxRoiNode.AddObserver(
+            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.checkROIPlacementComplete
+        )
+
+        # Provide user instructions via tooltip
+        slicer.util.infoDisplay(
+            "Draw the ROI and use the handles to adjust it. Click 'Done' when satisfied.",
+            autoCloseMsec=5000
+        )
+
+        # Enable "Done" button; disable "Mask" button
+        self.doneButton.enabled = True
         self.maskButton.enabled = False
 
-    def onBoundingBoxPointPlaced(self, caller, event):
-        nPoints = self.boundingBoxFiducialNode.GetNumberOfDefinedControlPoints()
-        if nPoints == 2:
-            slicer.util.infoDisplay("Two points placed. Click 'Done' to confirm bounding box.")
-            self.disablePointSelection()
-            self.doneButton.enabled = True
-
-    @staticmethod
-    def disablePointSelection():
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-        interactionNode.SetPlaceModePersistence(0)
-
-    def onDoneClicked(self):
-        if not self.boundingBoxFiducialNode or self.boundingBoxFiducialNode.GetNumberOfDefinedControlPoints() < 2:
-            slicer.util.warningDisplay("You must place two points first.")
+    def checkROIPlacementComplete(self, caller, event):
+        if not self.boundingBoxRoiNode:
             return
 
-        coords = self.computeBboxFromFiducials()
+        # Check if the ROI placement is complete
+        if self.boundingBoxRoiNode.GetControlPointPlacementComplete():
+            # Exit place mode and switch to View Transform mode
+            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+            interactionNode.SetPlaceModePersistence(0)  # Stop place mode
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)  # Enable view/edit mode
+
+            # Provide user feedback
+            slicer.util.infoDisplay(
+                "ROI placement complete. You can now edit the ROI using the handles or click 'Done' to finalize.",
+                autoCloseMsec=4000
+            )
+
+    def onDoneClicked(self):
+        if not self.boundingBoxRoiNode:
+            slicer.util.warningDisplay("You must place an ROI first.")
+            return
+
+        # Compute the bounding box from the ROI
+        coords = self.computeBboxFromROI()
         self.imageStates[self.currentImageIndex]["state"] = "bbox"
         self.imageStates[self.currentImageIndex]["bboxCoords"] = coords
         self.imageStates[self.currentImageIndex]["maskNodes"] = None
 
-        if self.boundingBoxFiducialNode.GetDisplayNode():
-            slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode.GetDisplayNode())
-        slicer.mrmlScene.RemoveNode(self.boundingBoxFiducialNode)
-        self.boundingBoxFiducialNode = None
+        # Disable interaction handles after ROI placement is confirmed
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetHandlesInteractive(False)  # Disable handles for editing
 
+        # Exit place mode
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetPlaceModePersistence(0)  # Exit place mode
+        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)  # Switch to view transform
+
+        slicer.util.infoDisplay(
+            "ROI placement finalized. You can now proceed with masking or further actions.",
+            autoCloseMsec=4000
+        )
+
+        # Remove the ROI node (clean up after confirming placement)
+        if self.boundingBoxRoiNode.GetDisplayNode():
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
+        slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+        self.boundingBoxRoiNode = None
+
+        # Update button states
         self.doneButton.enabled = False
         self.maskButton.enabled = True
         self.updateVolumeDisplay()
@@ -726,14 +769,17 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.currentImageIndex = origI
             self.updateVolumeDisplay()
 
+        # Restore button states
         self.restoreButtonStates()
         self.maskButton.enabled = True
 
-    def computeBboxFromFiducials(self):
-        p1 = [0.0, 0.0, 0.0]
-        p2 = [0.0, 0.0, 0.0]
-        self.boundingBoxFiducialNode.GetNthControlPointPositionWorld(0, p1)
-        self.boundingBoxFiducialNode.GetNthControlPointPositionWorld(1, p2)
+    def computeBboxFromROI(self):
+        roiBounds = [0] * 6
+        self.boundingBoxRoiNode.GetBounds(roiBounds)
+
+        # Get upper-left and lower-right points (ROI bounds)
+        p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]  # Xmin, Ymin, Zmin
+        p2 = [roiBounds[1], roiBounds[3], roiBounds[4]]  # Xmax, Ymax, Zmin (assuming 2D plane)
 
         vol = self.originalVolumes[self.currentImageIndex]
         rasToIjkMat = vtk.vtkMatrix4x4()
