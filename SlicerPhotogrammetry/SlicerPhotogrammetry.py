@@ -1048,6 +1048,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def onMaskClicked(self):
         import numpy as np
+        from PIL import Image
+        import cv2
 
         stInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stInfo or stInfo["state"] != "bbox":
@@ -1058,8 +1060,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setData = self.setStates[self.currentSet]
         colorArr = setData["originalColorArrays"][self.currentImageIndex]
 
-        from PIL import Image
-        import cv2
         pil_img = self.Image.fromarray(colorArr)
         cv_img_bgr = self.pil_to_opencv(pil_img)
 
@@ -1274,7 +1274,21 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setOutputFolder = os.path.join(outputFolder, self.currentSet)
         os.makedirs(setOutputFolder, exist_ok=True)
 
+        cpy = colorArr.copy()
+        cpy[~maskBool] = 0
+        cpy = np.flipud(cpy)  # flip back
+        cpy = np.fliplr(cpy)
+
         baseName = os.path.splitext(os.path.basename(self.imagePaths[index]))[0]
+        colorPngFilename = baseName + ".jpg"
+        colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
+
+        colorPil = Image.fromarray(cpy.astype(np.uint8))
+        if exif_bytes:
+            colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
+        else:
+            colorPil.save(colorPngPath, "jpeg", quality=100)
+
         maskBin = (maskBool.astype(np.uint8) * 255)
 
         maskBin = np.flipud(maskBin)
