@@ -92,7 +92,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maxCacheSize = 64
 
         # CHANGED: Decide how much to downsample for display
-        self.downsampleFactor = 0.95  # e.g. 25% of original dimension
+        self.downsampleFactor = 0.15  # e.g. 25% of original dimension
 
         # Master nodes
         self.masterVolumeNode = None
@@ -1332,7 +1332,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.vtkLogFilter = None
             self.logger = None
 
-        super().cleanup()
+        #super().cleanup()
 
     def updateWebODMTaskAvailability(self):
         allSetsMasked = self.allSetsHavePhysicalMasks()
