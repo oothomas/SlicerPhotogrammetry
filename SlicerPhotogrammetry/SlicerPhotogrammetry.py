@@ -429,7 +429,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
         red2Comp.SetForegroundVolumeID(self.emptyNode.GetID())
 
-    def onFindGCPScriptChanged(self, newPath):
+    @staticmethod
+    def onFindGCPScriptChanged(newPath):
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
 
     def updateMaskedCounter(self):
@@ -605,7 +606,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    def getEXIFBytes(self, path):
+    @staticmethod
+    def getEXIFBytes(path):
         from PIL import Image
         try:
             im = Image.open(path)
@@ -1271,7 +1273,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     return False
         return True
 
-    def detect_aruco_bounding_boxes(self, cv_img, aruco_dict=cv2.aruco.DICT_4X4_50):
+    @staticmethod
+    def detect_aruco_bounding_boxes(cv_img, aruco_dict=cv2.aruco.DICT_4X4_50):
         import cv2
         dictionary = cv2.aruco.getPredefinedDictionary(aruco_dict)
         corners, ids, rejected = cv2.aruco.detectMarkers(cv_img, dictionary)
@@ -1289,7 +1292,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 })
         return bounding_boxes
 
-    def assemble_bboxes(self, initial_box_np, marker_outputs, pad=25):
+    @staticmethod
+    def assemble_bboxes(initial_box_np, marker_outputs, pad=25):
         import numpy as np
         combined_boxes = [initial_box_np]
         for marker_dict in marker_outputs:
@@ -1301,7 +1305,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             combined_boxes.append(np.array([x_min_new, y_min_new, x_max_new, y_max_new]))
         return combined_boxes
 
-    def segment_with_boxes(self, image_rgb, boxes, predictor):
+    @staticmethod
+    def segment_with_boxes(image_rgb, boxes, predictor):
         import torch
         import numpy as np
         predictor.set_image(image_rgb)
@@ -1387,6 +1392,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         except Exception as e:
             slicer.util.warningDisplay(f"An error occurred running Find-GCP: {str(e)}")
 
+    @staticmethod
     def generateShortTaskName(self, basePrefix, paramsDict):
         paramItems = sorted(paramsDict.items())
         paramString = ";".join(f"{k}={v}" for k, v in paramItems)
