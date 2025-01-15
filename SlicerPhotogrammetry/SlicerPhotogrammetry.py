@@ -6,6 +6,7 @@ import vtk
 import slicer
 import shutil
 import numpy as np
+import logging
 import torch
 import time  # for timing
 import hashlib  # used for generating a short hash
@@ -29,6 +30,9 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
         self.parent.contributors = ["Oshane Thomas"]
         self.parent.helpText = """NA"""
         self.parent.acknowledgementText = """NA"""
+
+        # Suppress VTK warnings globally
+        vtk.vtkObject.GlobalWarningDisplayOff()
 
 
 class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
@@ -80,6 +84,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
+        self.vtkLogFilter = None
+        self.logger = None
         self.logic = SlicerPhotogrammetryLogic()
 
         # CHANGED: Add a small in-memory cache for color/mask arrays
@@ -181,6 +187,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
+        # Set up VTK logger to suppress specific messages
+        self.setupLogger()
+
         self.layout.setAlignment(qt.Qt.AlignTop)
 
         self.createCustomLayout()
@@ -390,6 +399,27 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         layoutNode.AddLayoutDescription(self.layoutId, customLayout)
         layoutMgr.setLayout(self.layoutId)
 
+    def setupLogger(self):
+        """
+        Set up a logger to filter and suppress specific VTK messages.
+        """
+
+        class VTKLogFilter(logging.Filter):
+            def filter(self, record):
+                suppressed_messages = [
+                    "Input port 0 of algorithm vtkImageMapToWindowLevelColors",
+                    "Input port 0 of algorithm vtkImageThreshold",
+                    "Initialize(): no image data to interpolate!"
+                ]
+                return not any(msg in record.getMessage() for msg in suppressed_messages)
+
+        # Get the VTK logger
+        self.logger = logging.getLogger('VTK')
+
+        # Add the custom filter
+        self.vtkLogFilter = VTKLogFilter()
+        self.logger.addFilter(self.vtkLogFilter)
+
     def createMasterNodes(self):
         if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
             slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
@@ -415,7 +445,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # CHANGED: Turn off interpolation on the 3 volumes to reduce overhead
         self.masterVolumeNode.GetDisplayNode().SetInterpolate(False)
-        #self.masterLabelMapNode.GetDisplayNode().SetInterpolate(False)
+
         self.masterMaskedVolumeNode.GetDisplayNode().SetInterpolate(False)
 
         # CHANGED: Also disable slice intersection or set label outline if desired
@@ -1237,6 +1267,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.masterLabelMapNode = None
         self.masterMaskedVolumeNode = None
         self.emptyNode = None
+
+        if self.logger and self.vtkLogFilter:
+            self.logger.removeFilter(self.vtkLogFilter)
+            self.vtkLogFilter = None
+            self.logger = None
+
+        super().cleanup()
 
     def updateWebODMTaskAvailability(self):
         allSetsMasked = self.allSetsHavePhysicalMasks()
