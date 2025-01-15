@@ -83,8 +83,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.logic = SlicerPhotogrammetryLogic()
 
         # CHANGED: Add a small in-memory cache for color/mask arrays
-        self.imageCache = {}  # Key: (setName, index), Value: dict with 'color', 'gray', 'mask'
-        self.maxCacheSize = 11  # Simple size limit for the cache
+        self.imageCache = {}  # Key: (setName, index), Value: dict with 'color', 'gray', etc.
+        self.maxCacheSize = 64  # Simple size limit for the cache
 
         # CHANGED: We will keep 3 master nodes in the scene for re-use
         self.masterVolumeNode = None
@@ -161,7 +161,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "feature-type": "dspsift",
             "feature-quality": "ultra",
             "pc-quality": "ultra",
-            "max-concurrency": 32,
+            "max-concurrency": 32,  # You added this. It's fine to keep as is.
         }
 
         # Factor levels that user can pick from
@@ -697,7 +697,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red').sliceLogic().FitSliceToAll()
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
-    # CHANGED: A single function to retrieve color & gray from cache or disk
+    # CHANGED: We only flip once, and store the flipped array in cache.
+    # Next time, if we find it in cache, no flipping is done again.
     def getColorAndGray(self, setName, index):
         # Check cache first
         key = (setName, index)
@@ -705,16 +706,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             entry = self.imageCache[key]
             return entry['color'], entry['gray']
 
-        # Otherwise, load from disk
+        # Otherwise, load from disk and flip once
         path = self.setStates[setName]["imagePaths"][index]
         from PIL import Image
         im = Image.open(path).convert('RGB')
         colorArr = np.array(im)
+
+        # CHANGED: We do flipping now, once:
         colorArr = np.flipud(colorArr)
         colorArr = np.fliplr(colorArr)
+
+        # Convert to grayscale
         grayArr = np.mean(colorArr, axis=2).astype(np.uint8)
 
-        # Add to cache
+        # Store in cache so we skip flipping in the future:
         if len(self.imageCache) >= self.maxCacheSize:
             self.evictOneFromCache()
         self.imageCache[key] = {'color': colorArr, 'gray': grayArr}
@@ -756,7 +761,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.emptyNode.GetID())
 
-    # CHANGED: showMaskedState => we fill self.masterLabelMapNode + self.masterMaskedVolumeNode
+    # CHANGED: showMaskedState => fill self.masterLabelMapNode + self.masterMaskedVolumeNode
     def showMaskedState(self, colorArr, imageIndex):
         stInfo = self.imageStates[imageIndex]
         if stInfo["state"] != "masked":
@@ -780,7 +785,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
 
-    # NEW: retrieve mask from disk or possibly cache it
+    # CHANGED: We do the same for the mask: flip once on first load, then use cache.
     def getMaskFromCacheOrDisk(self, setName, index):
         import numpy as np
         import os
@@ -791,12 +796,16 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         path = self.setStates[setName]["imagePaths"][index]
         baseName = os.path.splitext(os.path.basename(path))[0]
         maskPath = os.path.join(self.outputFolderSelector.directory, setName, f"{baseName}_mask.jpg")
+
         from PIL import Image
         maskPil = Image.open(maskPath).convert("L")
         maskArr = np.array(maskPil)
+
+        # Flip only once
         maskArr = np.flipud(maskArr)
         maskArr = np.fliplr(maskArr)
 
+        # Store the flipped mask in the cache
         if len(self.imageCache) >= self.maxCacheSize:
             self.evictOneFromCache()
         self.imageCache[key] = maskArr
