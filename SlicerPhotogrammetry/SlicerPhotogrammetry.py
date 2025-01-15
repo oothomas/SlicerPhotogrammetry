@@ -6,19 +6,18 @@ import vtk
 import slicer
 import shutil
 import numpy as np
+import logging
 import torch
 import time  # for timing
 import hashlib  # used for generating a short hash
 from slicer.ScriptedLoadableModule import *
 from typing import List
 
-
 def getWeights(filename):
     """Unused in logic; we do check_and_download_weights instead."""
     modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
     resourcePath = os.path.join(modulePath, 'Resources', filename)
     return resourcePath
-
 
 class SlicerPhotogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -29,6 +28,9 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
         self.parent.contributors = ["Oshane Thomas"]
         self.parent.helpText = """NA"""
         self.parent.acknowledgementText = """NA"""
+
+        # Suppress VTK warnings globally
+        vtk.vtkObject.GlobalWarningDisplayOff()
 
 
 class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
@@ -80,20 +82,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
+        self.vtkLogFilter = None
+        self.logger = None
         self.logic = SlicerPhotogrammetryLogic()
 
         # CHANGED: Add a small in-memory cache for color/mask arrays
-        self.imageCache = {}  # Key: (setName, index), Value: dict with 'color', 'gray', etc.
-        self.maxCacheSize = 64  # Simple size limit for the cache
+        #   Key: (setName, index, 'down'/'full'/'mask') => numpy array or dict
+        self.imageCache = {}
+        self.maxCacheSize = 64
 
-        # CHANGED: We will keep 3 master nodes in the scene for re-use
+        # CHANGED: Decide how much to downsample for display
+        self.downsampleFactor = 0.15  # e.g. 25% of original dimension
+
+        # Master nodes
         self.masterVolumeNode = None
         self.masterLabelMapNode = None
         self.masterMaskedVolumeNode = None
-
         self.emptyNode = None
 
-        # Track boundingBoxFiducialNode if needed
         self.boundingBoxFiducialNode = None
 
         self.setStates = {}
@@ -101,7 +107,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imagePaths = []
         self.currentImageIndex = 0
 
-        # Per-image state: "none"|"bbox"|"masked"
+        # Per-image state: "none" | "bbox" | "masked"
         self.imageStates = {}
 
         self.createdNodes = []
@@ -131,16 +137,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.loadModelButton = None
         self.modelLoaded = False
 
-        # GCP-related UI elements
+        # GCP
         self.findGCPScriptSelector = None
         self.gcpCoordFileSelector = None
         self.arucoDictIDSpinBox = None
         self.generateGCPButton = None
-
         self.gcpListContent = ""
         self.gcpCoordFilePath = ""
 
-        # WebODM-related (non-blocking)
+        # WebODM
         self.nodeIPLineEdit = None
         self.nodePortSpinBox = None
         self.launchWebODMTaskButton = None
@@ -161,10 +166,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "feature-type": "dspsift",
             "feature-quality": "ultra",
             "pc-quality": "ultra",
-            "max-concurrency": 32,  # You added this. It's fine to keep as is.
+            "max-concurrency": 32,
         }
 
-        # Factor levels that user can pick from
+        # Factor levels
         self.factorLevels = {
             "ignore-gsd": [False, True],
             "matcher-neighbors": [0, 8, 16, 24],
@@ -181,8 +186,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
-        self.layout.setAlignment(qt.Qt.AlignTop)
+        # Set up VTK logger to suppress specific messages
+        self.setupLogger()
 
+        self.layout.setAlignment(qt.Qt.AlignTop)
         self.createCustomLayout()
 
         #
@@ -194,9 +201,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
         self.samVariantCombo = qt.QComboBox()
-        self.samVariantCombo.addItem("ViT-base (~376 MB)")  # => "vit_b"
-        self.samVariantCombo.addItem("ViT-large (~1.03 GB)")  # => "vit_l"
-        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")  # => "vit_h"
+        self.samVariantCombo.addItem("ViT-base (~376 MB)")
+        self.samVariantCombo.addItem("ViT-large (~1.03 GB)")
+        self.samVariantCombo.addItem("ViT-huge (~2.55 GB)")
         parametersFormLayout.addRow("SAM Variant:", self.samVariantCombo)
 
         self.loadModelButton = qt.QPushButton("Load Model")
@@ -362,11 +369,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.layout.addStretch(1)
 
-        # CHANGED: Create our 3 master nodes (volume, label, masked) once at startup
         self.createMasterNodes()
 
     def createCustomLayout(self):
-        """Creates a 2-slice layout: Red and Red2 side by side."""
         customLayout = """
         <layout type="horizontal" split="true">
           <item>
@@ -390,34 +395,64 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         layoutNode.AddLayoutDescription(self.layoutId, customLayout)
         layoutMgr.setLayout(self.layoutId)
 
-    # NEW: One-time creation of three "master" volume nodes in the scene
+    def setupLogger(self):
+        """
+        Set up a logger to filter and suppress specific VTK messages.
+        """
+
+        class VTKLogFilter(logging.Filter):
+            def filter(self, record):
+                suppressed_messages = [
+                    "Input port 0 of algorithm vtkImageMapToWindowLevelColors",
+                    "Input port 0 of algorithm vtkImageThreshold",
+                    "Initialize(): no image data to interpolate!"
+                ]
+                return not any(msg in record.getMessage() for msg in suppressed_messages)
+
+        # Get the VTK logger
+        self.logger = logging.getLogger('VTK')
+
+        # Add the custom filter
+        self.vtkLogFilter = VTKLogFilter()
+        self.logger.addFilter(self.vtkLogFilter)
+
     def createMasterNodes(self):
-        # Create or re-create the volume node for grayscale
         if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
             slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
         self.masterVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MasterVolume")
         self.masterVolumeNode.CreateDefaultDisplayNodes()
 
-        # Create or re-create the label map node
         if self.masterLabelMapNode and slicer.mrmlScene.IsNodePresent(self.masterLabelMapNode):
             slicer.mrmlScene.RemoveNode(self.masterLabelMapNode)
         self.masterLabelMapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "MasterLabel")
         self.masterLabelMapNode.CreateDefaultDisplayNodes()
 
-        # Create or re-create the masked volume node
         if self.masterMaskedVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterMaskedVolumeNode):
             slicer.mrmlScene.RemoveNode(self.masterMaskedVolumeNode)
         self.masterMaskedVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MasterMasked")
         self.masterMaskedVolumeNode.CreateDefaultDisplayNodes()
 
-        # Also create one small empty volume
+        # Also create a small empty volume
         self.emptyNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "EmptyVolume")
         self.emptyNode.CreateDefaultDisplayNodes()
         import numpy as np
         dummy = np.zeros((1, 1), dtype=np.uint8)
         slicer.util.updateVolumeFromArray(self.emptyNode, dummy)
 
-        # Hook them up to the 2-slice layout
+        # Turn off interpolation on masterVolumeNode and masterMaskedVolumeNode
+        self.masterVolumeNode.GetDisplayNode().SetInterpolate(False)
+        self.masterMaskedVolumeNode.GetDisplayNode().SetInterpolate(False)
+        # We won't call SetInterpolate on labelmap because it doesn't have that method.
+
+        # Set label outline settings in slice nodes if desired
+        redSliceLogic = slicer.app.layoutManager().sliceWidget('Red').sliceLogic()
+        redSliceNode = redSliceLogic.GetSliceNode()
+        redSliceNode.SetUseLabelOutline(False)
+
+        red2SliceLogic = slicer.app.layoutManager().sliceWidget('Red2').sliceLogic()
+        red2SliceNode = red2SliceLogic.GetSliceNode()
+        red2SliceNode.SetUseLabelOutline(True)
+
         lm = slicer.app.layoutManager()
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComp.SetBackgroundVolumeID(self.masterVolumeNode.GetID())
@@ -544,11 +579,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.launchWebODMTaskButton.setEnabled(False)
         self.maskedCountLabel.setText("Masked: 0/0")
 
-        # CHANGED: Also clear our cache and zero out the volumes
+        # Clear cache and reset volumes
         self.imageCache.clear()
         self.resetMasterVolumes()
 
-    # NEW: Utility to reset the 3 master volumes to be empty
     def resetMasterVolumes(self):
         import numpy as np
         emptyArr = np.zeros((1, 1), dtype=np.uint8)
@@ -572,7 +606,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 slicer.util.warningDisplay("No images found in this set.")
                 return
 
-            # Clear our cache because we switched sets
             self.imageCache.clear()
 
             self.imageStates = {}
@@ -582,7 +615,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 exifMap[i] = exif_bytes
                 self.imageStates[i] = {
                     "state": "none",
-                    "bboxCoords": None,
+                    "bboxCoords": None,  # We'll store *downsampled* bbox coords
                     "maskNodes": None
                 }
 
@@ -650,32 +683,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageStates = setData["imageStates"]
         self.currentImageIndex = 0
 
-        # Clear cache to avoid mixing from a previous set
         self.imageCache.clear()
-
         self.updateVolumeDisplay()
         self.placeBoundingBoxButton.enabled = True
         self.refreshButtonStatesBasedOnCurrentState()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    # CHANGED: Instead of creating new volume nodes, we just update the masterVolumeNode
     def updateVolumeDisplay(self):
         self.imageIndexLabel.setText(f"[Image {self.currentImageIndex}]")
-
         if self.currentImageIndex < 0 or self.currentImageIndex >= len(self.imagePaths):
             return
 
         st = self.imageStates[self.currentImageIndex]["state"]
-
-        # We remove previous lines but not the entire volume node; we'll just redraw if needed
         self.removeBboxLines()
 
-        # 1) Get the grayscale image from disk (or cache) and set it into self.masterVolumeNode
-        colorArr, grayArr = self.getColorAndGray(self.currentSet, self.currentImageIndex)
-        slicer.util.updateVolumeFromArray(self.masterVolumeNode, grayArr)
+        # Retrieve *downsampled* color & grayscale
+        colorArrDown, grayArrDown = self.getDownsampledColorAndGray(self.currentSet, self.currentImageIndex)
+        slicer.util.updateVolumeFromArray(self.masterVolumeNode, grayArrDown)
 
-        # 2) Decide how to show label or masked
+        # Show
         if st == "none":
             self.showOriginalOnly()
             self.doneButton.enabled = False
@@ -686,47 +713,67 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.doneButton.enabled = False
             self.maskButton.enabled = True
         elif st == "masked":
-            self.showMaskedState(colorArr, self.currentImageIndex)
+            # We still pass the *downsampled* colorArr so we can build a corresponding masked preview
+            self.showMaskedState(colorArrDown, self.currentImageIndex)
             self.doneButton.enabled = False
             self.maskButton.enabled = False
 
         self.enableMaskAllImagesIfPossible()
 
-        # Fit slices
         lm = slicer.app.layoutManager()
         lm.sliceWidget('Red').sliceLogic().FitSliceToAll()
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
-    # CHANGED: We only flip once, and store the flipped array in cache.
-    # Next time, if we find it in cache, no flipping is done again.
-    def getColorAndGray(self, setName, index):
-        # Check cache first
-        key = (setName, index)
-        if key in self.imageCache:
-            entry = self.imageCache[key]
+    def getDownsampledColorAndGray(self, setName, index):
+        """
+        Return (downsampledColor, downsampledGray) from cache or create them.
+        We also store the *full-res* in the cache for segmentation.
+        """
+        # Check if downsample already in cache
+        downKey = (setName, index, 'down')
+        if downKey in self.imageCache:
+            entry = self.imageCache[downKey]
             return entry['color'], entry['gray']
 
-        # Otherwise, load from disk and flip once
+        # If not, load or retrieve the full-res
+        fullColor = self.getFullColorArray(setName, index)
+        # Downsample it
+        import cv2
+        h, w, _ = fullColor.shape
+        newW = int(w * self.downsampleFactor)
+        newH = int(h * self.downsampleFactor)
+        colorDown = cv2.resize(fullColor, (newW, newH), interpolation=cv2.INTER_AREA)
+        grayDown = np.mean(colorDown, axis=2).astype(np.uint8)
+
+        if len(self.imageCache) >= self.maxCacheSize:
+            self.evictOneFromCache()
+        self.imageCache[downKey] = {'color': colorDown, 'gray': grayDown}
+        return colorDown, grayDown
+
+    def getFullColorArray(self, setName, index):
+        """
+        Return the *full-resolution* color array, flipping if needed.
+        We store it in cache under (setName, index, 'full').
+        """
+        fullKey = (setName, index, 'full')
+        if fullKey in self.imageCache:
+            return self.imageCache[fullKey]
+
         path = self.setStates[setName]["imagePaths"][index]
         from PIL import Image
         im = Image.open(path).convert('RGB')
         colorArr = np.array(im)
 
-        # CHANGED: We do flipping now, once:
+        # Flip once
         colorArr = np.flipud(colorArr)
         colorArr = np.fliplr(colorArr)
 
-        # Convert to grayscale
-        grayArr = np.mean(colorArr, axis=2).astype(np.uint8)
-
-        # Store in cache so we skip flipping in the future:
+        # Store
         if len(self.imageCache) >= self.maxCacheSize:
             self.evictOneFromCache()
-        self.imageCache[key] = {'color': colorArr, 'gray': grayArr}
+        self.imageCache[fullKey] = colorArr
+        return colorArr
 
-        return colorArr, grayArr
-
-    # NEW: minimal approach to evict one oldest item from the cache
     def evictOneFromCache(self):
         k = next(iter(self.imageCache.keys()))
         del self.imageCache[k]
@@ -751,31 +798,28 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         else:
             self.maskAllImagesButton.enabled = False
 
-    # CHANGED: showOriginalOnly => just hide label, hide the other slice?s background
     def showOriginalOnly(self):
         lm = slicer.app.layoutManager()
-
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComp.SetLabelVolumeID(self.emptyNode.GetID())
 
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.emptyNode.GetID())
 
-    # CHANGED: showMaskedState => fill self.masterLabelMapNode + self.masterMaskedVolumeNode
-    def showMaskedState(self, colorArr, imageIndex):
+    def showMaskedState(self, colorArrDown, imageIndex):
         stInfo = self.imageStates[imageIndex]
         if stInfo["state"] != "masked":
             return
+        # Retrieve mask from disk or cache, in *downsampled* form
+        maskDown = self.getMaskFromCacheOrDisk(self.currentSet, imageIndex, downsample=True)
+        labelDown = (maskDown > 127).astype(np.uint8)
 
-        maskArr = self.getMaskFromCacheOrDisk(self.currentSet, imageIndex)
-        labelArr = (maskArr > 127).astype(np.uint8)
+        slicer.util.updateVolumeFromArray(self.masterLabelMapNode, labelDown)
 
-        slicer.util.updateVolumeFromArray(self.masterLabelMapNode, labelArr)
-
-        cpy = colorArr.copy()
-        cpy[labelArr == 0] = 0
-        grayMasked = np.mean(cpy, axis=2).astype(np.uint8)
-        slicer.util.updateVolumeFromArray(self.masterMaskedVolumeNode, grayMasked)
+        cpy = colorArrDown.copy()
+        cpy[labelDown == 0] = 0
+        grayMaskedDown = np.mean(cpy, axis=2).astype(np.uint8)
+        slicer.util.updateVolumeFromArray(self.masterMaskedVolumeNode, grayMaskedDown)
 
         lm = slicer.app.layoutManager()
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
@@ -785,14 +829,22 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
 
-    # CHANGED: We do the same for the mask: flip once on first load, then use cache.
-    def getMaskFromCacheOrDisk(self, setName, index):
-        import numpy as np
-        import os
-        key = (setName, index, 'mask')
-        if key in self.imageCache:
-            return self.imageCache[key]
+    def getMaskFromCacheOrDisk(self, setName, index, downsample=False):
+        """
+        If downsample=True, we produce a downsampled mask to match the 'down' dimension.
+        Otherwise we can retrieve or produce the full mask, etc.
+        For masked-state display, we want a downsampled mask.
+        """
+        if downsample:
+            key = (setName, index, 'mask-down')
+            if key in self.imageCache:
+                return self.imageCache[key]
+        else:
+            key = (setName, index, 'mask')
+            if key in self.imageCache:
+                return self.imageCache[key]
 
+        # We have to read the full mask from disk, then downsample if requested
         path = self.setStates[setName]["imagePaths"][index]
         baseName = os.path.splitext(os.path.basename(path))[0]
         maskPath = os.path.join(self.outputFolderSelector.directory, setName, f"{baseName}_mask.jpg")
@@ -800,16 +852,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         from PIL import Image
         maskPil = Image.open(maskPath).convert("L")
         maskArr = np.array(maskPil)
-
-        # Flip only once
         maskArr = np.flipud(maskArr)
         maskArr = np.fliplr(maskArr)
 
-        # Store the flipped mask in the cache
-        if len(self.imageCache) >= self.maxCacheSize:
-            self.evictOneFromCache()
-        self.imageCache[key] = maskArr
-        return maskArr
+        if downsample:
+            # Downsample to the same shape as the 'down' color
+            colorDown, _ = self.getDownsampledColorAndGray(setName, index)
+            hD, wD = colorDown.shape[:2]
+            import cv2
+            maskDown = cv2.resize(maskArr, (wD, hD), interpolation=cv2.INTER_NEAREST)
+            if len(self.imageCache) >= self.maxCacheSize:
+                self.evictOneFromCache()
+            self.imageCache[(setName, index, 'mask-down')] = maskDown
+            return maskDown
+        else:
+            if len(self.imageCache) >= self.maxCacheSize:
+                self.evictOneFromCache()
+            self.imageCache[(setName, index, 'mask')] = maskArr
+            return maskArr
 
     def onPrevImage(self):
         if self.currentImageIndex > 0:
@@ -878,9 +938,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
             self.boundingBoxRoiNode = None
 
-        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass(
-            "vtkMRMLMarkupsROINode", "BoundingBoxROI"
-        )
+        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", "BoundingBoxROI")
         self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
         dnode = self.boundingBoxRoiNode.GetDisplayNode()
         dnode.SetVisibility(True)
@@ -896,7 +954,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.boundingBoxRoiNode.AddObserver(
             slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.checkROIPlacementComplete
         )
-
         slicer.util.infoDisplay(
             "Draw the ROI and use the handles to adjust it. Click 'Done' when satisfied.",
             autoCloseMsec=5000
@@ -908,14 +965,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def checkROIPlacementComplete(self, caller, event):
         if not self.boundingBoxRoiNode:
             return
-
         if self.boundingBoxRoiNode.GetControlPointPlacementComplete():
             interactionNode = slicer.app.applicationLogic().GetInteractionNode()
             interactionNode.SetPlaceModePersistence(0)
             interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
             slicer.util.infoDisplay(
-                "ROI placement complete. You can now edit the ROI using the handles or click 'Done' to finalize.",
+                "ROI placement complete. You can now edit the ROI or click 'Done' to finalize.",
                 autoCloseMsec=4000
             )
 
@@ -924,9 +979,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("You must place an ROI first.")
             return
 
-        coords = self.computeBboxFromROI()
+        coordsDown = self.computeBboxFromROI()
+        # We store *downsampled* coords in imageStates
         self.imageStates[self.currentImageIndex]["state"] = "bbox"
-        self.imageStates[self.currentImageIndex]["bboxCoords"] = coords
+        self.imageStates[self.currentImageIndex]["bboxCoords"] = coordsDown
         self.imageStates[self.currentImageIndex]["maskNodes"] = None
 
         dnode = self.boundingBoxRoiNode.GetDisplayNode()
@@ -936,10 +992,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         interactionNode.SetPlaceModePersistence(0)
         interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
 
-        slicer.util.infoDisplay(
-            "ROI placement finalized. You can now proceed with masking or further actions.",
-            autoCloseMsec=4000
-        )
+        slicer.util.infoDisplay("ROI placement finalized. You can mask now.", autoCloseMsec=4000)
 
         if self.boundingBoxRoiNode.GetDisplayNode():
             slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
@@ -968,7 +1021,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskButton.enabled = True
 
     def computeBboxFromROI(self):
-        roiBounds = [0] * 6
+        """
+        Return the bounding box in *downsampled* IJK coords.
+        We'll scale up later for SAM.
+        """
+        roiBounds = [0]*6
         self.boundingBoxRoiNode.GetBounds(roiBounds)
         p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]
         p2 = [roiBounds[1], roiBounds[3], roiBounds[4]]
@@ -1010,7 +1067,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
-
         self.updateVolumeDisplay()
 
     def deleteMaskFile(self, index, setName):
@@ -1032,20 +1088,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("No bounding box defined for this image.")
             return
 
-        path = self.imagePaths[self.currentImageIndex]
-        colorArr, _ = self.getColorAndGray(self.currentSet, self.currentImageIndex)
-        bbox = stInfo["bboxCoords"]
+        # CHANGED: We scale the bounding box up to full res before calling SAM.
+        bboxDown = stInfo["bboxCoords"]
+        # Convert down -> full
+        bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, self.currentImageIndex)
 
-        marker_outputs = self.detect_aruco_bounding_boxes(self.logic.pil_to_opencv(self.logic.array_to_pil(colorArr)),
-                                                          aruco_dict=cv2.aruco.DICT_4X4_250)
+        colorArrFull = self.getFullColorArray(self.currentSet, self.currentImageIndex)
+
+        # Detect ArUco
+        opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
+        marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
+
         if len(marker_outputs) == 0:
-            mask = self.logic.run_sam_segmentation(colorArr, bbox)
+            mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
         else:
             import torch
-            init_box_np = np.array([bbox[0], bbox[1], bbox[2], bbox[3]])
-            all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
-            self.logic.predictor.set_image(colorArr)
-            combined_mask = np.zeros((colorArr.shape[0], colorArr.shape[1]), dtype=bool)
+            all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
+            self.logic.predictor.set_image(colorArrFull)
+            combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
             for box in all_boxes:
                 with torch.no_grad():
                     masks, _, _ = self.logic.predictor.predict(
@@ -1058,17 +1118,35 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 combined_mask = np.logical_or(combined_mask, mask_bool)
             mask = combined_mask.astype(np.uint8)
 
-        self.buildAndShowMaskNodes(self.currentImageIndex, colorArr, mask)
         stInfo["state"] = "masked"
-
         maskBool = (mask > 0)
-        self.saveMaskedImage(self.currentImageIndex, colorArr, maskBool)
+        self.saveMaskedImage(self.currentImageIndex, colorArrFull, maskBool)
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    def buildAndShowMaskNodes(self, imageIndex, colorArr, mask):
-        pass  # We rely on updateVolumeDisplay() to refresh the view.
+    def downBboxToFullBbox(self, bboxDown, setName, index):
+        """
+        Takes a bounding box in *downsampled* coords,
+        returns bounding box in *full* coords
+        by applying scale factors.
+        """
+        x_minD, y_minD, x_maxD, y_maxD = bboxDown
+
+        fullArr = self.getFullColorArray(setName, index)
+        downArr, _ = self.getDownsampledColorAndGray(setName, index)
+
+        fullH, fullW, _ = fullArr.shape
+        downH, downW, _ = downArr.shape
+
+        scaleX = fullW / downW
+        scaleY = fullH / downH
+
+        x_minF = int(round(x_minD * scaleX))
+        x_maxF = int(round(x_maxD * scaleX))
+        y_minF = int(round(y_minD * scaleY))
+        y_maxF = int(round(y_maxD * scaleY))
+        return (x_minF, y_minF, x_maxF, y_maxF)
 
     def onMaskAllImagesClicked(self):
         stInfo = self.imageStates.get(self.currentImageIndex, None)
@@ -1076,7 +1154,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("Current image is not masked or has no bounding box info.")
             return
 
-        bbox = stInfo["bboxCoords"]
+        # We'll reuse the bounding box from the current image
+        bboxDown = stInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
         self.maskAllProgressBar.setTextVisible(True)
         toMask = [i for i in range(len(self.imagePaths)) if
@@ -1093,8 +1172,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         start_time = time.time()
 
         for count, i in enumerate(toMask):
+            self.maskSingleImage(i, bboxDown)
             processed = count + 1
-            self.maskSingleImage(i, bbox)
             self.maskAllProgressBar.setValue(processed)
             elapsed_secs = time.time() - start_time
             avg = elapsed_secs / processed
@@ -1122,24 +1201,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    def maskSingleImage(self, index, bboxCoords):
+    def maskSingleImage(self, index, bboxDown):
         import numpy as np
         import cv2
         import torch
 
-        colorArr, _ = self.getColorAndGray(self.currentSet, index)
-        marker_outputs = self.detect_aruco_bounding_boxes(
-            self.logic.pil_to_opencv(self.logic.array_to_pil(colorArr)),
-            aruco_dict=cv2.aruco.DICT_4X4_250
-        )
+        # Scale the down box to full
+        bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, index)
+        colorArrFull = self.getFullColorArray(self.currentSet, index)
+
+        opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
+        marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
         if len(marker_outputs) == 0:
-            mask = self.logic.run_sam_segmentation(colorArr, bboxCoords)
+            mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
         else:
-            init_box_np = np.array([bboxCoords[0], bboxCoords[1], bboxCoords[2], bboxCoords[3]])
-            all_boxes = self.assemble_bboxes(init_box_np, marker_outputs, pad=25)
-            self.logic.predictor.set_image(colorArr)
-            combined_mask = np.zeros((colorArr.shape[0], colorArr.shape[1]), dtype=bool)
+            all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
+            self.logic.predictor.set_image(colorArrFull)
+            combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
             for box in all_boxes:
                 with torch.no_grad():
                     masks, _, _ = self.logic.predictor.predict(
@@ -1153,13 +1232,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             mask = combined_mask.astype(np.uint8)
 
         self.imageStates[index]["state"] = "masked"
-        self.imageStates[index]["bboxCoords"] = bboxCoords
+        self.imageStates[index]["bboxCoords"] = bboxDown
         self.imageStates[index]["maskNodes"] = None
 
         maskBool = (mask > 0)
-        self.saveMaskedImage(index, colorArr, maskBool)
+        self.saveMaskedImage(index, colorArrFull, maskBool)
 
-    def saveMaskedImage(self, index, colorArr, maskBool):
+    def saveMaskedImage(self, index, colorArrFull, maskBool):
         from PIL import Image
         setData = self.setStates[self.currentSet]
         exifMap = setData.get("exifData", {})
@@ -1169,7 +1248,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         setOutputFolder = os.path.join(outputFolder, self.currentSet)
         os.makedirs(setOutputFolder, exist_ok=True)
 
-        cpy = colorArr.copy()
+        cpy = colorArrFull.copy()
         cpy[~maskBool] = 0
         cpy = np.flipud(cpy)
         cpy = np.fliplr(cpy)
@@ -1198,9 +1277,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 slicer.mrmlScene.RemoveNode(ln)
         self.currentBboxLineNodes = []
 
-    def drawBboxLines(self, coords):
-        if not coords:
+    def drawBboxLines(self, coordsDown):
+        if not coordsDown:
             return
+        # coordsDown are for the *downsampled* volume
         ijkToRasMat = vtk.vtkMatrix4x4()
         self.masterVolumeNode.GetIJKToRASMatrix(ijkToRasMat)
 
@@ -1209,7 +1289,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             ras = ijkToRasMat.MultiplyPoint(p)
             return [ras[0], ras[1], ras[2]]
 
-        x_min, y_min, x_max, y_max = coords
+        x_min, y_min, x_max, y_max = coordsDown
         p1 = ijkToRas(x_min, y_min)
         p2 = ijkToRas(x_max, y_min)
         p3 = ijkToRas(x_max, y_max)
@@ -1233,7 +1313,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def cleanup(self):
         self.saveCurrentSetState()
-
         if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
             slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
         if self.masterLabelMapNode and slicer.mrmlScene.IsNodePresent(self.masterLabelMapNode):
@@ -1248,6 +1327,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.masterMaskedVolumeNode = None
         self.emptyNode = None
 
+        if self.logger and self.vtkLogFilter:
+            self.logger.removeFilter(self.vtkLogFilter)
+            self.vtkLogFilter = None
+            self.logger = None
+
+        #super().cleanup()
+
     def updateWebODMTaskAvailability(self):
         allSetsMasked = self.allSetsHavePhysicalMasks()
         self.launchWebODMTaskButton.setEnabled(allSetsMasked)
@@ -1255,11 +1341,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def allSetsHavePhysicalMasks(self):
         if not self.setStates:
             return False
-
         outputRoot = self.outputFolderSelector.directory
         if not os.path.isdir(outputRoot):
             return False
-
         for setName, setData in self.setStates.items():
             setOutputFolder = os.path.join(outputRoot, setName)
             if not os.path.isdir(setOutputFolder):
@@ -1321,7 +1405,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def onGenerateGCPClicked(self):
         import subprocess
-
         find_gcp_script = self.findGCPScriptSelector.currentPath
         if not find_gcp_script or not os.path.isfile(find_gcp_script):
             slicer.util.errorDisplay("Please select a valid Find-GCP.py script path.")
@@ -1397,11 +1480,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def onRunWebODMTask(self):
         """
-        CHANGED: Instead of uploading the original images from the master folder,
-        we now only collect the masked color images and _mask.jpg files from
-        the output folder. This ensures WebODM uses the masked versions.
+        CHANGED: uses only masked color .jpg + _mask.jpg from output folder
         """
-
         import glob
         from pyodm import Node
 
@@ -1422,41 +1502,22 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay("Master folder is invalid. Aborting.")
             return
 
-        # -------------------------------------------------------------------
-        # ORIGINAL CODE (commented out to preserve it, but no longer used):
-        #
-        # all_original_jpgs = []
-        # for root, dirs, files in os.walk(masterFolder):
-        #     for fn in files:
-        #         if fn.lower().endswith(".jpg"):
-        #             all_original_jpgs.append(os.path.join(root, fn))
-        #
-        # Instead, we gather the masked color images from the output folder
-        # plus the mask images (which end with '_mask.jpg').
-        # -------------------------------------------------------------------
-
         outputFolder = self.outputFolderSelector.directory
         if not outputFolder or not os.path.isdir(outputFolder):
             slicer.util.errorDisplay("Output folder is invalid. Aborting.")
             return
 
-        # Gather masked color .jpg (these are the saved masked images) ...
         all_masked_color_jpgs = []
-        # ... and also gather the _mask.jpg files
         all_mask_jpgs = []
         for root, dirs, files in os.walk(outputFolder):
             for fn in files:
                 lower_fn = fn.lower()
                 if lower_fn.endswith(".jpg") and not lower_fn.endswith("_mask.jpg"):
-                    # This is our masked color image
                     all_masked_color_jpgs.append(os.path.join(root, fn))
                 elif lower_fn.endswith("_mask.jpg"):
-                    # This is the mask file
                     all_mask_jpgs.append(os.path.join(root, fn))
 
-        # Combine them into one list for upload
         all_jpgs = all_masked_color_jpgs + all_mask_jpgs
-
         if len(all_jpgs) == 0:
             slicer.util.warningDisplay("No masked .jpg images found in output folder.")
             return
@@ -1480,7 +1541,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     params[factorName] = chosen_str
 
         shortTaskName = self.generateShortTaskName("SlicerReconstruction", params)
-
         slicer.util.infoDisplay("Creating WebODM Task (non-blocking). Upload may take time...")
 
         try:
@@ -1520,7 +1580,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def checkWebODMTaskStatus(self):
         if not self.webodmTask:
             return
-
         try:
             info = self.webodmTask.info(with_output=self.lastWebODMOutputLineIndex)
         except Exception as e:
@@ -1535,7 +1594,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.lastWebODMOutputLineIndex += len(newLines)
 
         self.webodmLogTextEdit.append(f"Status: {info.status.name}, Progress: {info.progress}%")
-
         cursor = self.webodmLogTextEdit.textCursor()
         cursor.movePosition(qt.QTextCursor.End)
         self.webodmLogTextEdit.setTextCursor(cursor)
@@ -1558,7 +1616,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.webodmTask = None
             self.webodmOutDir = None
             self.stopMonitoringButton.setEnabled(False)
-
         elif info.status.name.lower() in ["failed", "canceled"]:
             self.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
             slicer.app.processEvents()
@@ -1575,7 +1632,6 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
     """
     Loads the SAM model, runs segmentation on color arrays.
     """
-
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
         self.predictor = None
@@ -1631,7 +1687,6 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
     def run_sam_segmentation(self, image_rgb, bounding_box):
         if not self.predictor:
             raise RuntimeError("SAM model is not loaded.")
-
         import torch
         import numpy as np
         box = np.array(bounding_box, dtype=np.float32)
@@ -1645,12 +1700,10 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
             )
         return masks[0].astype(np.uint8)
 
-    # NEW: helper that converts a colorArr (numpy) to PIL
     def array_to_pil(self, colorArr):
         from PIL import Image
         return Image.fromarray(colorArr.astype(np.uint8))
 
-    # NEW: quick wrapper from the existing code
     def pil_to_opencv(self, pil_image):
         import cv2
         import numpy as np
