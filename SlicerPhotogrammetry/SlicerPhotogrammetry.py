@@ -13,13 +13,11 @@ import hashlib  # used for generating a short hash
 from slicer.ScriptedLoadableModule import *
 from typing import List
 
-
 def getWeights(filename):
     """Unused in logic; we do check_and_download_weights instead."""
     modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
     resourcePath = os.path.join(modulePath, 'Resources', filename)
     return resourcePath
-
 
 class SlicerPhotogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -965,7 +963,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         if s == "masked":
             if slicer.util.confirmYesNoDisplay(
-                    "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
+                "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
             ):
                 self.removeMaskFromCurrentImage()
                 self.startPlacingROI()
@@ -973,7 +971,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 self.restoreButtonStates()
         elif s == "bbox":
             if slicer.util.confirmYesNoDisplay(
-                    "A bounding box already exists. Creating a new one will remove it. Proceed?"
+                "A bounding box already exists. Creating a new one will remove it. Proceed?"
             ):
                 self.removeBboxFromCurrentImage()
                 self.startPlacingROI()
@@ -1093,7 +1091,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskButton.enabled = True
 
     def computeBboxFromROI(self):
-        roiBounds = [0] * 6
+        roiBounds = [0]*6
         self.boundingBoxRoiNode.GetBounds(roiBounds)
         p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]
         p2 = [roiBounds[1], roiBounds[3], roiBounds[4]]
@@ -1683,7 +1681,6 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
     """
     Loads the SAM model, runs segmentation on color arrays.
     """
-
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
         self.predictor = None
