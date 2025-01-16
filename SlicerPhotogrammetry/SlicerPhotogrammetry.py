@@ -60,6 +60,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     try:
         import cv2
+        # Check if contrib modules are available
+        if not hasattr(cv2, 'xfeatures2d'):
+            raise ImportError("opencv-contrib-python is not properly installed")
     except ImportError:
         slicer.util.pip_install("opencv-python")
         slicer.util.pip_install("opencv-contrib-python")
@@ -72,9 +75,21 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         import segment_anything
 
     try:
+        import git
+    except ImportError:
+        slicer.util.pip_install("GitPython")
+        import git
+
+    try:
         import pyodm
     except ImportError:
         slicer.util.pip_install("pyodm")
+        import pyodm
+
+    try:
+        import matplotlib
+    except ImportError:
+        slicer.util.pip_install("matplotlib")
         import pyodm
 
     from segment_anything import sam_model_registry, SamPredictor
@@ -87,11 +102,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.logic = SlicerPhotogrammetryLogic()
 
         # CHANGED: Add a small in-memory cache for color/mask arrays
-        #   Key: (setName, index, 'down'/'full'/'mask') => numpy array or dict
         self.imageCache = {}
         self.maxCacheSize = 64
 
-        # CHANGED: Decide how much to downsample for display
         self.downsampleFactor = 0.15  # e.g. 25% of original dimension
 
         # Master nodes
@@ -107,7 +120,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imagePaths = []
         self.currentImageIndex = 0
 
-        # Per-image state: "none" | "bbox" | "masked"
         self.imageStates = {}
 
         self.createdNodes = []
@@ -115,7 +127,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.boundingBoxRoiNode = None
         self.placingBoundingBox = False
 
-        # Common UI references
         self.buttonsToManage = []
         self.prevButton = None
         self.nextButton = None
@@ -139,11 +150,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # GCP
         self.findGCPScriptSelector = None
+        self.generateGCPButton = None
         self.gcpCoordFileSelector = None
         self.arucoDictIDSpinBox = None
-        self.generateGCPButton = None
         self.gcpListContent = ""
         self.gcpCoordFilePath = ""
+
+        # ------------------ NEW BUTTON ADDED BELOW ------------------
+        self.cloneFindGCPButton = None
 
         # WebODM
         self.nodeIPLineEdit = None
@@ -156,7 +170,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton = None
         self.lastWebODMOutputLineIndex = 0
 
-        # Baseline fixed parameters
         self.baselineParams = {
             "matcher-type": "bruteforce",
             "orthophoto-resolution": 0.3,
@@ -169,7 +182,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "max-concurrency": 32,
         }
 
-        # Factor levels
         self.factorLevels = {
             "ignore-gsd": [False, True],
             "matcher-neighbors": [0, 8, 16, 24],
@@ -302,10 +314,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(webODMCollapsibleButton)
         webODMFormLayout = qt.QFormLayout(webODMCollapsibleButton)
 
+        # --------------- NEW "CLONE FIND-GCP" BUTTON ADDED ---------------
+        self.cloneFindGCPButton = qt.QPushButton("Clone Find-GCP")
+        webODMFormLayout.addWidget(self.cloneFindGCPButton)
+        self.cloneFindGCPButton.connect('clicked(bool)', self.onCloneFindGCPClicked)
+
         self.findGCPScriptSelector = ctk.ctkPathLineEdit()
         self.findGCPScriptSelector.filters = ctk.ctkPathLineEdit().Files
         self.findGCPScriptSelector.setToolTip("Select path to Find-GCP.py script.")
-        webODMCollapsibleButton.layout().addWidget(self.findGCPScriptSelector)
         webODMFormLayout.addRow("Find-GCP Script:", self.findGCPScriptSelector)
 
         savedFindGCPScript = slicer.app.settings().value("SlicerPhotogrammetry/findGCPScriptPath", "")
@@ -371,6 +387,89 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.createMasterNodes()
 
+    # --------------- NEW METHOD FOR DOWNLOADING FIND-GCP SCRIPT ---------------
+    def onCloneFindGCPClicked(self):
+        """
+        Clone the entire zsiki/Find-GCP repo into the Resources folder using GitPython.
+        If the folder already exists, ask user if they want to overwrite it.
+        Then set the findGCPScriptSelector path to 'gcp_find.py' (or whichever script is needed).
+        """
+        import os, shutil
+        import slicer
+
+        # If GitPython not installed, try installing it now
+        try:
+            import git
+        except ImportError:
+            slicer.util.pip_install("GitPython")
+            import git  # try again
+
+        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+        resourcesFolder = os.path.join(modulePath, 'Resources')
+        os.makedirs(resourcesFolder, exist_ok=True)
+
+        # The folder where we'll clone the entire repo:
+        cloneFolder = os.path.join(resourcesFolder, "Find-GCP-Repo")
+
+        # The specific script we actually want to point to after cloning:
+        localGCPFindScript = os.path.join(cloneFolder, "gcp_find.py")
+
+        # Check if we already have a clone folder
+        if os.path.isdir(cloneFolder):
+            # Ask user if they'd like to redownload / overwrite
+            msg = (
+                "The 'Find-GCP-Repo' folder already exists in the Resources directory.\n"
+                "Would you like to delete it and clone again (overwrite)?"
+            )
+            if not slicer.util.confirmYesNoDisplay(msg):
+                slicer.util.infoDisplay("Using existing clone; no changes made.")
+                # Just point to the existing script if it?s actually there
+                if os.path.isfile(localGCPFindScript):
+                    self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
+                    slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+                else:
+                    slicer.util.warningDisplay(
+                        f"Existing clone found, but {localGCPFindScript} does not exist.\n"
+                        "Please pick the correct script manually."
+                    )
+                return
+            else:
+                # Remove existing folder first
+                try:
+                    shutil.rmtree(cloneFolder)
+                except Exception as e:
+                    slicer.util.errorDisplay(
+                        f"Failed to remove existing cloned folder:\n{cloneFolder}\nError: {str(e)}"
+                    )
+                    return
+
+        # Proceed with fresh clone
+        slicer.util.infoDisplay(
+            f"Cloning the entire Find-GCP repo to:\n{cloneFolder}\nPlease wait...",
+            autoCloseMsec=3000
+        )
+        try:
+            # Use GitPython's clone_from
+            git.Repo.clone_from(
+                url="https://github.com/zsiki/Find-GCP.git",
+                to_path=cloneFolder
+            )
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to clone Find-GCP repo:\n{str(e)}")
+            return
+
+        # Now confirm the script we want is present
+        if not os.path.isfile(localGCPFindScript):
+            slicer.util.warningDisplay(
+                f"Repo cloned, but {localGCPFindScript} was not found.\n"
+                "Please check the repo contents or specify the correct script."
+            )
+            return
+
+        # Finally, set the UI path to the newly-cloned script and store in settings
+        self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
+        slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+
     def createCustomLayout(self):
         customLayout = """
         <layout type="horizontal" split="true">
@@ -432,19 +531,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.masterMaskedVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MasterMasked")
         self.masterMaskedVolumeNode.CreateDefaultDisplayNodes()
 
-        # Also create a small empty volume
         self.emptyNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "EmptyVolume")
         self.emptyNode.CreateDefaultDisplayNodes()
         import numpy as np
         dummy = np.zeros((1, 1), dtype=np.uint8)
         slicer.util.updateVolumeFromArray(self.emptyNode, dummy)
 
-        # Turn off interpolation on masterVolumeNode and masterMaskedVolumeNode
         self.masterVolumeNode.GetDisplayNode().SetInterpolate(False)
         self.masterMaskedVolumeNode.GetDisplayNode().SetInterpolate(False)
-        # We won't call SetInterpolate on labelmap because it doesn't have that method.
 
-        # Set label outline settings in slice nodes if desired
         redSliceLogic = slicer.app.layoutManager().sliceWidget('Red').sliceLogic()
         redSliceNode = redSliceLogic.GetSliceNode()
         redSliceNode.SetUseLabelOutline(False)
@@ -579,7 +674,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.launchWebODMTaskButton.setEnabled(False)
         self.maskedCountLabel.setText("Masked: 0/0")
 
-        # Clear cache and reset volumes
         self.imageCache.clear()
         self.resetMasterVolumes()
 
@@ -615,7 +709,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 exifMap[i] = exif_bytes
                 self.imageStates[i] = {
                     "state": "none",
-                    "bboxCoords": None,  # We'll store *downsampled* bbox coords
+                    "bboxCoords": None,
                     "maskNodes": None
                 }
 
@@ -698,11 +792,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         st = self.imageStates[self.currentImageIndex]["state"]
         self.removeBboxLines()
 
-        # Retrieve *downsampled* color & grayscale
         colorArrDown, grayArrDown = self.getDownsampledColorAndGray(self.currentSet, self.currentImageIndex)
         slicer.util.updateVolumeFromArray(self.masterVolumeNode, grayArrDown)
 
-        # Show
         if st == "none":
             self.showOriginalOnly()
             self.doneButton.enabled = False
@@ -713,7 +805,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.doneButton.enabled = False
             self.maskButton.enabled = True
         elif st == "masked":
-            # We still pass the *downsampled* colorArr so we can build a corresponding masked preview
             self.showMaskedState(colorArrDown, self.currentImageIndex)
             self.doneButton.enabled = False
             self.maskButton.enabled = False
@@ -725,19 +816,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
     def getDownsampledColorAndGray(self, setName, index):
-        """
-        Return (downsampledColor, downsampledGray) from cache or create them.
-        We also store the *full-res* in the cache for segmentation.
-        """
-        # Check if downsample already in cache
         downKey = (setName, index, 'down')
         if downKey in self.imageCache:
             entry = self.imageCache[downKey]
             return entry['color'], entry['gray']
 
-        # If not, load or retrieve the full-res
         fullColor = self.getFullColorArray(setName, index)
-        # Downsample it
+
         import cv2
         h, w, _ = fullColor.shape
         newW = int(w * self.downsampleFactor)
@@ -751,10 +836,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         return colorDown, grayDown
 
     def getFullColorArray(self, setName, index):
-        """
-        Return the *full-resolution* color array, flipping if needed.
-        We store it in cache under (setName, index, 'full').
-        """
         fullKey = (setName, index, 'full')
         if fullKey in self.imageCache:
             return self.imageCache[fullKey]
@@ -764,11 +845,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         im = Image.open(path).convert('RGB')
         colorArr = np.array(im)
 
-        # Flip once
         colorArr = np.flipud(colorArr)
         colorArr = np.fliplr(colorArr)
 
-        # Store
         if len(self.imageCache) >= self.maxCacheSize:
             self.evictOneFromCache()
         self.imageCache[fullKey] = colorArr
@@ -810,7 +889,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         stInfo = self.imageStates[imageIndex]
         if stInfo["state"] != "masked":
             return
-        # Retrieve mask from disk or cache, in *downsampled* form
         maskDown = self.getMaskFromCacheOrDisk(self.currentSet, imageIndex, downsample=True)
         labelDown = (maskDown > 127).astype(np.uint8)
 
@@ -830,11 +908,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
 
     def getMaskFromCacheOrDisk(self, setName, index, downsample=False):
-        """
-        If downsample=True, we produce a downsampled mask to match the 'down' dimension.
-        Otherwise we can retrieve or produce the full mask, etc.
-        For masked-state display, we want a downsampled mask.
-        """
         if downsample:
             key = (setName, index, 'mask-down')
             if key in self.imageCache:
@@ -844,7 +917,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             if key in self.imageCache:
                 return self.imageCache[key]
 
-        # We have to read the full mask from disk, then downsample if requested
         path = self.setStates[setName]["imagePaths"][index]
         baseName = os.path.splitext(os.path.basename(path))[0]
         maskPath = os.path.join(self.outputFolderSelector.directory, setName, f"{baseName}_mask.jpg")
@@ -856,7 +928,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         maskArr = np.fliplr(maskArr)
 
         if downsample:
-            # Downsample to the same shape as the 'down' color
             colorDown, _ = self.getDownsampledColorAndGray(setName, index)
             hD, wD = colorDown.shape[:2]
             import cv2
@@ -980,7 +1051,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return
 
         coordsDown = self.computeBboxFromROI()
-        # We store *downsampled* coords in imageStates
         self.imageStates[self.currentImageIndex]["state"] = "bbox"
         self.imageStates[self.currentImageIndex]["bboxCoords"] = coordsDown
         self.imageStates[self.currentImageIndex]["maskNodes"] = None
@@ -1021,10 +1091,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskButton.enabled = True
 
     def computeBboxFromROI(self):
-        """
-        Return the bounding box in *downsampled* IJK coords.
-        We'll scale up later for SAM.
-        """
         roiBounds = [0]*6
         self.boundingBoxRoiNode.GetBounds(roiBounds)
         p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]
@@ -1088,14 +1154,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("No bounding box defined for this image.")
             return
 
-        # CHANGED: We scale the bounding box up to full res before calling SAM.
         bboxDown = stInfo["bboxCoords"]
-        # Convert down -> full
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, self.currentImageIndex)
-
         colorArrFull = self.getFullColorArray(self.currentSet, self.currentImageIndex)
 
-        # Detect ArUco
         opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
         marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
@@ -1126,11 +1188,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateWebODMTaskAvailability()
 
     def downBboxToFullBbox(self, bboxDown, setName, index):
-        """
-        Takes a bounding box in *downsampled* coords,
-        returns bounding box in *full* coords
-        by applying scale factors.
-        """
         x_minD, y_minD, x_maxD, y_maxD = bboxDown
 
         fullArr = self.getFullColorArray(setName, index)
@@ -1154,7 +1211,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("Current image is not masked or has no bounding box info.")
             return
 
-        # We'll reuse the bounding box from the current image
         bboxDown = stInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
         self.maskAllProgressBar.setTextVisible(True)
@@ -1206,7 +1262,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         import cv2
         import torch
 
-        # Scale the down box to full
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, index)
         colorArrFull = self.getFullColorArray(self.currentSet, index)
 
@@ -1280,7 +1335,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def drawBboxLines(self, coordsDown):
         if not coordsDown:
             return
-        # coordsDown are for the *downsampled* volume
         ijkToRasMat = vtk.vtkMatrix4x4()
         self.masterVolumeNode.GetIJKToRASMatrix(ijkToRasMat)
 
@@ -1331,8 +1385,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.logger.removeFilter(self.vtkLogFilter)
             self.vtkLogFilter = None
             self.logger = None
-
-        #super().cleanup()
 
     def updateWebODMTaskAvailability(self):
         allSetsMasked = self.allSetsHavePhysicalMasks()
@@ -1479,9 +1531,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         return shortName
 
     def onRunWebODMTask(self):
-        """
-        CHANGED: uses only masked color .jpg + _mask.jpg from output folder
-        """
         import glob
         from pyodm import Node
 
