@@ -646,20 +646,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def createMasterNodes(self):
         if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
             slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
-        self.masterVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MasterVolume")
+        self.masterVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", "ImageVolume")
         self.masterVolumeNode.CreateDefaultDisplayNodes()
 
         if self.masterLabelMapNode and slicer.mrmlScene.IsNodePresent(self.masterLabelMapNode):
             slicer.mrmlScene.RemoveNode(self.masterLabelMapNode)
-        self.masterLabelMapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "MasterLabel")
+        self.masterLabelMapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "MaskOverlay")
         self.masterLabelMapNode.CreateDefaultDisplayNodes()
 
         if self.masterMaskedVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterMaskedVolumeNode):
             slicer.mrmlScene.RemoveNode(self.masterMaskedVolumeNode)
-        self.masterMaskedVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MasterMasked")
+        self.masterMaskedVolumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", "MaskVolume")
         self.masterMaskedVolumeNode.CreateDefaultDisplayNodes()
 
-        self.emptyNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "EmptyVolume")
+        self.emptyNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "NullVolume")
         self.emptyNode.CreateDefaultDisplayNodes()
         import numpy as np
         dummy = np.zeros((1, 1), dtype=np.uint8)
@@ -921,7 +921,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.removeBboxLines()
 
         colorArrDown, grayArrDown = self.getDownsampledColorAndGray(self.currentSet, self.currentImageIndex)
-        slicer.util.updateVolumeFromArray(self.masterVolumeNode, grayArrDown)
+
+        colorArrDownRGBA = colorArrDown[np.newaxis, ...]
+        slicer.util.updateVolumeFromArray(self.masterVolumeNode, colorArrDownRGBA)
 
         if st == "none":
             self.showOriginalOnly()
@@ -1024,8 +1026,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         cpy = colorArrDown.copy()
         cpy[labelDown == 0] = 0
-        grayMaskedDown = np.mean(cpy, axis=2).astype(np.uint8)
-        slicer.util.updateVolumeFromArray(self.masterMaskedVolumeNode, grayMaskedDown)
+        #grayMaskedDown = np.mean(cpy, axis=2).astype(np.uint8)
+        cpyRGBA = cpy[np.newaxis, ...]
+
+        slicer.util.updateVolumeFromArray(self.masterMaskedVolumeNode, cpyRGBA)
 
         lm = slicer.app.layoutManager()
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
