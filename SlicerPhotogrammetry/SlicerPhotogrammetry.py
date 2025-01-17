@@ -7,7 +7,6 @@ import slicer
 import shutil
 import numpy as np
 import logging
-import torch
 import time  # for timing
 import hashlib  # used for generating a short hash
 import subprocess  # for new Docker commands
@@ -517,12 +516,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # Launch
         try:
+            if not os.path.isdir(self.webODMLocalFolder):
+                slicer.util.infoDisplay("Creating webODM Directory")
+                os.makedirs(self.webODMLocalFolder, exist_ok=True)
+
+            # Path to local folder for storing WebODM files
+            local_folder = self.webODMLocalFolder
+
             slicer.util.infoDisplay("Launching new WebODM container on port 3002 with GPU support...")
             cmd = [
                 "docker", "run", "--rm", "-d",
                 "-p", "3002:3000",
                 "--gpus", "all",  # or --runtime=nvidia
                 "--name", "slicer-webodm-3002",
+                "-v", f"{local_folder}:/webodm_data",  # Map local folder to container's data directory
                 "opendronemap/nodeodm:gpu"
             ]
             subprocess.run(cmd, check=True)
@@ -680,12 +687,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComp.SetBackgroundVolumeID(self.masterVolumeNode.GetID())
         redComp.SetLabelVolumeID(self.masterLabelMapNode.GetID())
-        redComp.SetForegroundVolumeID(self.emptyNode.GetID())
+        #redComp.SetForegroundVolumeID(self.emptyNode.GetID())
 
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
         red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
-        red2Comp.SetForegroundVolumeID(self.emptyNode.GetID())
+        #red2Comp.SetForegroundVolumeID(self.emptyNode.GetID())
 
     def onFindGCPScriptChanged(self, newPath):
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
