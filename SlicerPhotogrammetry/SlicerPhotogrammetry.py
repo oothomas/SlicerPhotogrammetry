@@ -49,74 +49,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - **NEW** Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
     """
 
-    # ALWAYS ADD EXTERNAL IMPORTS HERE
-    ##############################################################
-    # EXIF helper: read/write using Pillow
-    ##############################################################
-    try:
-        import PyTorchUtils
-    except ModuleNotFoundError:
-        slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. Please install it from the "
-                               "Extensions Manager.")
-    torchLogic = PyTorchUtils.PyTorchUtilsLogic()
-    if not torchLogic.torchInstalled():
-        logging.debug('SlicerPhotogrammetry requires the PyTorch Python package. Installing... (it may take several '
-                      'minutes)')
-        torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')#,
-                                        #torchvisionVersionRequirement=">=0.13")
-        if torch is None:
-            slicer.util.messageBox('PyTorch extension needs to be installed manually to use this module.')
-
-    try:
-        from PIL import Image
-        from PIL.ExifTags import TAGS
-    except ImportError:
-        slicer.util.pip_install("Pillow")
-        from PIL import Image
-        from PIL.ExifTags import TAGS
-
-    try:
-        import cv2
-        # Check if contrib modules are available
-        if not hasattr(cv2, 'xfeatures2d'):
-            raise ImportError("opencv-contrib-python is not properly installed")
-    except ImportError:
-        slicer.util.pip_install("opencv-python")
-        slicer.util.pip_install("opencv-contrib-python")
-        import cv2
-
-    try:
-        import segment_anything
-    except ImportError:
-        slicer.util.pip_install("git+https://github.com/facebookresearch/segment-anything.git")
-        import segment_anything
-
-    try:
-        import git
-    except ImportError:
-        slicer.util.pip_install("GitPython")
-        import git
-
-    try:
-        import pyodm
-    except ImportError:
-        slicer.util.pip_install("pyodm")
-        import pyodm
-
-    try:
-        import matplotlib
-    except ImportError:
-        slicer.util.pip_install("matplotlib")
-        import pyodm
-
-    from segment_anything import sam_model_registry, SamPredictor
-
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
+        self.logic = None
         self.vtkLogFilter = None
         self.logger = None
-        self.logic = SlicerPhotogrammetryLogic()
 
         # CHANGED: small in-memory cache
         self.imageCache = {}
@@ -222,6 +160,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
+
+        self.load_dependencies()
+        self.logic = SlicerPhotogrammetryLogic()
+
         self.setupLogger()
         self.layout.setAlignment(qt.Qt.AlignTop)
         self.createCustomLayout()
@@ -434,6 +376,81 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Initialize path for local WebODM folder
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
+
+    def load_dependencies(self):
+        # ALWAYS ADD EXTERNAL IMPORTS HERE
+        ##############################################################
+        # EXIF helper: read/write using Pillow
+        ##############################################################
+        try:
+            import PyTorchUtils
+        except ModuleNotFoundError:
+            slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. Please install it from the "
+                                   "Extensions Manager.")
+        torchLogic = PyTorchUtils.PyTorchUtilsLogic()
+        if not torchLogic.torchInstalled():
+            logging.debug(
+                'SlicerPhotogrammetry requires the PyTorch Python package. Installing... (it may take several '
+                'minutes)')
+            torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')  # ,
+            # torchvisionVersionRequirement=">=0.13")
+
+            if torch:
+                # Ask user to restart 3D Slicer
+                restart = slicer.util.confirmYesNoDisplay(
+                    "Pytorch dependencies has been installed. To apply changes, a restart of 3D Slicer is necessary. "
+                    "Would you like to restart now? Click 'YES' to restart immediately or 'NO' if you wish to save your "
+                    "work first and restart manually later.")
+
+                if restart:
+                    slicer.util.restart()
+
+            if torch is None:
+                slicer.util.messageBox('PyTorch extension needs to be installed manually to use this module.')
+
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS
+        except ImportError:
+            slicer.util.pip_install("Pillow")
+            from PIL import Image
+            from PIL.ExifTags import TAGS
+
+        try:
+            import cv2
+            # Check if contrib modules are available
+            if not hasattr(cv2, 'xfeatures2d'):
+                raise ImportError("opencv-contrib-python is not properly installed")
+        except ImportError:
+            slicer.util.pip_install("opencv-python")
+            slicer.util.pip_install("opencv-contrib-python")
+            import cv2
+
+        try:
+            import segment_anything
+        except ImportError:
+            slicer.util.pip_install("git+https://github.com/facebookresearch/segment-anything.git")
+            import segment_anything
+
+        try:
+            import git
+        except ImportError:
+            slicer.util.pip_install("GitPython")
+            import git
+
+        try:
+            import pyodm
+        except ImportError:
+            slicer.util.pip_install("pyodm")
+            import pyodm
+
+        try:
+            import matplotlib
+        except ImportError:
+            slicer.util.pip_install("matplotlib")
+            import pyodm
+
+        from segment_anything import sam_model_registry, SamPredictor
 
     ###
     # NEW METHODS for WebODM installation / check / launch
@@ -701,12 +718,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComp.SetBackgroundVolumeID(self.masterVolumeNode.GetID())
         redComp.SetLabelVolumeID(self.masterLabelMapNode.GetID())
-        #redComp.SetForegroundVolumeID(self.emptyNode.GetID())
+        # redComp.SetForegroundVolumeID(self.emptyNode.GetID())
 
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
         red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
-        #red2Comp.SetForegroundVolumeID(self.emptyNode.GetID())
+        # red2Comp.SetForegroundVolumeID(self.emptyNode.GetID())
 
     def onFindGCPScriptChanged(self, newPath):
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
@@ -1047,7 +1064,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         cpy = colorArrDown.copy()
         cpy[labelDown == 0] = 0
-        #grayMaskedDown = np.mean(cpy, axis=2).astype(np.uint8)
+        # grayMaskedDown = np.mean(cpy, axis=2).astype(np.uint8)
         cpyRGBA = cpy[np.newaxis, ...]
 
         slicer.util.updateVolumeFromArray(self.masterMaskedVolumeNode, cpyRGBA)
@@ -1560,8 +1577,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     return False
         return True
 
-    def detect_aruco_bounding_boxes(self, cv_img, aruco_dict=cv2.aruco.DICT_4X4_50):
+    def detect_aruco_bounding_boxes(self, cv_img, aruco_dict=None):
         import cv2
+
+        if not aruco_dict:
+            aruco_dict = cv2.aruco.DICT_4X4_50
+
         dictionary = cv2.aruco.getPredefinedDictionary(aruco_dict)
         corners, ids, rejected = cv2.aruco.detectMarkers(cv_img, dictionary)
         bounding_boxes = []
