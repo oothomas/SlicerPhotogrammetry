@@ -54,6 +54,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     # EXIF helper: read/write using Pillow
     ##############################################################
     try:
+        import PyTorchUtils
+    except ModuleNotFoundError:
+        slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. Please install it from the "
+                               "Extensions Manager.")
+    torchLogic = PyTorchUtils.PyTorchUtilsLogic()
+    if not torchLogic.torchInstalled():
+        logging.debug('SlicerPhotogrammetry requires the PyTorch Python package. Installing... (it may take several '
+                      'minutes)')
+        torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')#,
+                                        #torchvisionVersionRequirement=">=0.13")
+        if torch is None:
+            slicer.util.messageBox('PyTorch extension needs to be installed manually to use this module.')
+
+    try:
         from PIL import Image
         from PIL.ExifTags import TAGS
     except ImportError:
