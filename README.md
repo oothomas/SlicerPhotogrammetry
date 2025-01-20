@@ -2,6 +2,9 @@
 An extension to preprocess (masking) large collection photographs which then can be processed to construct 3D models with texture. 
 See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step up and optionally use Aruco markers to obtain physical scale of the object. 
 
+## Prerequisites
+Torch (will install the PyTorch extension, if not already installed). 
+
 ## Sample Data
 
 ## Usage Instructions
