@@ -332,13 +332,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(webodmTaskCollapsible)
         webodmTaskFormLayout = qt.QFormLayout(webodmTaskCollapsible)
 
-        self.nodeIPLineEdit = qt.QLineEdit("10.40.20.25")
+        self.nodeIPLineEdit = qt.QLineEdit("127.0.0.1")
         webodmTaskFormLayout.addRow("Node IP:", self.nodeIPLineEdit)
 
         self.nodePortSpinBox = qt.QSpinBox()
         self.nodePortSpinBox.setMinimum(1)
         self.nodePortSpinBox.setMaximum(65535)
-        self.nodePortSpinBox.setValue(3001)
+        self.nodePortSpinBox.setValue(3002)
         webodmTaskFormLayout.addRow("Node Port:", self.nodePortSpinBox)
 
         for factorName, levels in self.factorLevels.items():
@@ -1653,12 +1653,12 @@ class SlicerWebODMManager:
             return
 
         from pyodm import Node
-        ip_test = "10.40.20.25"
+        ip_test = "127.0.0.1"
         port_test = 3002
         try:
             test_node = Node(ip_test, port_test)
             info = test_node.info()
-            slicer.util.infoDisplay("WebODM node found on 10.40.20.25:3002.\nAuto-populating IP & Port.")
+            slicer.util.infoDisplay("WebODM node found on 127.0.0.1:3002.\nAuto-populating IP & Port.")
             self.widget.nodeIPLineEdit.setText(ip_test)
             self.widget.nodePortSpinBox.setValue(port_test)
             slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", ip_test)
@@ -1747,9 +1747,9 @@ class SlicerWebODMManager:
             subprocess.run(cmd, check=True)
 
             slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
-            self.widget.nodeIPLineEdit.setText("10.40.20.25")
+            self.widget.nodeIPLineEdit.setText("127.0.0.1")
             self.widget.nodePortSpinBox.setValue(3002)
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "10.40.20.25")
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "127.0.0.1")
             slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", "3002")
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
