@@ -14,11 +14,11 @@ from slicer.ScriptedLoadableModule import *
 from typing import List
 
 
-def getWeights(filename):
-    """Unused in logic; we do check_and_download_weights instead."""
-    modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
-    resourcePath = os.path.join(modulePath, 'Resources', filename)
-    return resourcePath
+# def getWeights(filename):
+#     """Unused in logic; we do check_and_download_weights instead."""
+#     modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+#     resourcePath = os.path.join(modulePath, 'Resources', filename)
+#     return resourcePath
 
 
 class SlicerPhotogrammetry(ScriptedLoadableModule):
