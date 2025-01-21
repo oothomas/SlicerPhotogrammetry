@@ -546,7 +546,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
-        red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
+        #red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
 
     def onFindGCPScriptChanged(self, newPath):
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
