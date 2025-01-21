@@ -14,13 +14,6 @@ from slicer.ScriptedLoadableModule import *
 from typing import List
 
 
-def getWeights(filename):
-    """Unused in logic; we do check_and_download_weights instead."""
-    modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
-    resourcePath = os.path.join(modulePath, 'Resources', filename)
-    return resourcePath
-
-
 class SlicerPhotogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
@@ -46,7 +39,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Creating single combined GCP file for all sets,
      - Non-blocking WebODM tasks (using pyodm),
      - Shortening WebODM output folder names,
-     - **NEW** Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
+     - Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
     """
 
     def __init__(self, parent=None):
@@ -118,9 +111,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.nodeIPLineEdit = None
         self.nodePortSpinBox = None
         self.launchWebODMTaskButton = None
-        self.webodmTask = None
-        self.webodmOutDir = None
-        self.webodmTimer = None
         self.webodmLogTextEdit = None
         self.stopMonitoringButton = None
         self.lastWebODMOutputLineIndex = 0
@@ -157,6 +147,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.webODMInstallButton = None
         self.webODMRelaunchButton = None
         self.webODMLocalFolder = None  # e.g. <ModulePath>/Resources/WebODM
+
+        # NEW: We'll hold a reference to the manager class once it's created.
+        self.webODMManager = None
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -336,6 +329,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.launchWebODMTaskButton = qt.QPushButton("Run WebODM Task With Selected Parameters (non-blocking)")
         webodmTaskFormLayout.addWidget(self.launchWebODMTaskButton)
         self.launchWebODMTaskButton.setEnabled(False)
+        # NOTE: The actual logic to start the task is now delegated to the manager, but we keep the UI binding here.
         self.launchWebODMTaskButton.connect('clicked(bool)', self.onRunWebODMTask)
 
         self.webodmLogTextEdit = qt.QTextEdit()
@@ -345,7 +339,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton = qt.QPushButton("Stop Monitoring")
         self.stopMonitoringButton.setEnabled(False)
         webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
-        self.stopMonitoringButton.connect('clicked(bool)', self.onStopMonitoring)
 
         ###
         # (D) NEW SECTION: Manage WebODM Installation & Launch
@@ -358,17 +351,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Button to check if WebODM is installed/running
         self.webODMCheckStatusButton = qt.QPushButton("Check WebODM Status on port 3002")
         manageWODMFormLayout.addWidget(self.webODMCheckStatusButton)
-        self.webODMCheckStatusButton.connect('clicked(bool)', self.onCheckWebODMStatusClicked)
 
         # Button to install or reinstall
         self.webODMInstallButton = qt.QPushButton("Install/Reinstall WebODM (GPU)")
         manageWODMFormLayout.addWidget(self.webODMInstallButton)
-        self.webODMInstallButton.connect('clicked(bool)', self.onInstallWebODMClicked)
 
         # Button to re-launch
         self.webODMRelaunchButton = qt.QPushButton("Relaunch WebODM on Port 3002")
         manageWODMFormLayout.addWidget(self.webODMRelaunchButton)
-        self.webODMRelaunchButton.connect('clicked(bool)', self.onRelaunchWebODMClicked)
 
         self.layout.addStretch(1)
         self.createMasterNodes()
@@ -376,6 +366,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Initialize path for local WebODM folder
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
+
+        # ----
+        # (E) Initialize the WebODM Manager, hooking up all the WebODM-related signals:
+        # ----
+        self.webODMManager = SlicerWebODMManager(widget=self)
+        self.webODMCheckStatusButton.connect('clicked(bool)', self.webODMManager.onCheckWebODMStatusClicked)
+        self.webODMInstallButton.connect('clicked(bool)', self.webODMManager.onInstallWebODMClicked)
+        self.webODMRelaunchButton.connect('clicked(bool)', self.webODMManager.onRelaunchWebODMClicked)
+        self.stopMonitoringButton.connect('clicked(bool)', self.webODMManager.onStopMonitoring)
 
     def load_dependencies(self):
         # ALWAYS ADD EXTERNAL IMPORTS HERE
@@ -392,8 +391,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             logging.debug(
                 'SlicerPhotogrammetry requires the PyTorch Python package. Installing... (it may take several '
                 'minutes)')
-            torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')  # ,
-            # torchvisionVersionRequirement=">=0.13")
+            torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
 
             if torch:
                 # Ask user to restart 3D Slicer
@@ -448,200 +446,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             import matplotlib
         except ImportError:
             slicer.util.pip_install("matplotlib")
-            import pyodm
+            import matplotlib
 
         from segment_anything import sam_model_registry, SamPredictor
-
-    ###
-    # NEW METHODS for WebODM installation / check / launch
-    ###
-    def onCheckWebODMStatusClicked(self):
-        """Check if Docker is installed, see if anything is on port 3002,
-        and if so, auto-populate IP/port in the UI."""
-        # 1) Check Docker
-        try:
-            subprocess.run(["docker", "--version"], check=True, capture_output=True)
-        except Exception as e:
-            slicer.util.warningDisplay(
-                f"Docker not found or not in PATH.\nError: {str(e)}\nPlease install Docker first."
-            )
-            return
-
-        # 2) Check port 3002
-        from pyodm import Node
-        ip_test = "10.40.20.25"
-        port_test = 3002
-        try:
-            test_node = Node(ip_test, port_test)
-            info = test_node.info()
-            slicer.util.infoDisplay("WebODM node found on 10.40.20.25:3002.\nAuto-populating IP & Port.")
-            self.nodeIPLineEdit.setText(ip_test)
-            self.nodePortSpinBox.setValue(port_test)
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", ip_test)
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", str(port_test))
-        except Exception:
-            slicer.util.infoDisplay("No WebODM node found on port 3002. You can install/launch below.")
-
-    def onInstallWebODMClicked(self):
-        """Install or re-install WebODM (GPU-based) in self.webODMLocalFolder.
-        For demonstration, we only do docker pull of 'opendronemap/nodeodm:gpu'."""
-        if os.path.isdir(self.webODMLocalFolder):
-            msg = (
-                f"A WebODM folder already exists at:\n{self.webODMLocalFolder}\n"
-                "Delete it and reinstall?"
-            )
-            if not slicer.util.confirmYesNoDisplay(msg):
-                slicer.util.infoDisplay("Using existing WebODM directory. No changes made.")
-                return
-            else:
-                try:
-                    shutil.rmtree(self.webODMLocalFolder)
-                except Exception as e:
-                    slicer.util.errorDisplay(f"Failed to remove old WebODM folder:\n{str(e)}")
-                    return
-        os.makedirs(self.webODMLocalFolder, exist_ok=True)
-
-        # Pull GPU-based Docker image
-        slicer.util.infoDisplay("Pulling WebODM GPU Docker image. This can take a while...")
-        try:
-            process = subprocess.Popen(
-                ["docker", "pull", "opendronemap/nodeodm:gpu"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            # Read standard output line by line and log it
-            for line in process.stdout:
-                logging.info(line.strip())
-
-            # Read standard error line by line and log it as error
-            for line in process.stderr:
-                logging.error(line.strip())
-
-            # Wait for the process to complete
-            return_code = process.wait()
-            if return_code == 0:
-                slicer.util.infoDisplay("WebODM (GPU) image pulled successfully.")
-            else:
-                slicer.util.errorDisplay(
-                    f"Docker pull failed. Exit code: {return_code}. Check the log for details."
-                )
-        except Exception as e:
-            slicer.util.errorDisplay(f"Docker pull failed: {str(e)}")
-
-    def onRelaunchWebODMClicked(self):
-        """Stop any container on port 3002, then launch WebODM with GPU support on 3002."""
-        # Stop old containers on 3002
-        try:
-            result = subprocess.run(
-                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
-                capture_output=True, text=True
-            )
-            container_ids = result.stdout.strip().split()
-            for cid in container_ids:
-                if cid:
-                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
-                    subprocess.run(["docker", "stop", cid], check=True)
-        except Exception as e:
-            slicer.util.warningDisplay(f"Error stopping old container(s): {str(e)}")
-
-        # Launch
-        try:
-            if not os.path.isdir(self.webODMLocalFolder):
-                slicer.util.infoDisplay("Creating webODM Directory")
-                os.makedirs(self.webODMLocalFolder, exist_ok=True)
-
-            # Path to local folder for storing WebODM files
-            local_folder = self.webODMLocalFolder
-
-            slicer.util.infoDisplay("Launching new WebODM container on port 3002 with GPU support...")
-            cmd = [
-                "docker", "run", "--rm", "-d",
-                "-p", "3002:3000",
-                "--gpus", "all",  # or --runtime=nvidia
-                "--name", "slicer-webodm-3002",
-                "-v", f"{local_folder}:/webodm_data",  # Map local folder to container's data directory
-                "opendronemap/nodeodm:gpu"
-            ]
-            subprocess.run(cmd, check=True)
-
-            slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
-            # Auto-populate
-            self.nodeIPLineEdit.setText("10.40.20.25")
-            self.nodePortSpinBox.setValue(3002)
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "10.40.20.25")
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", "3002")
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
-
-    ###
-    # Existing methods below (no changes removed)
-    ###
-    def onCloneFindGCPClicked(self):
-        import os, shutil
-        import slicer
-
-        # If GitPython not installed, try installing it now
-        try:
-            import git
-        except ImportError:
-            slicer.util.pip_install("GitPython")
-            import git  # try again
-
-        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
-        resourcesFolder = os.path.join(modulePath, 'Resources')
-        os.makedirs(resourcesFolder, exist_ok=True)
-
-        cloneFolder = os.path.join(resourcesFolder, "Find-GCP-Repo")
-        localGCPFindScript = os.path.join(cloneFolder, "gcp_find.py")
-
-        if os.path.isdir(cloneFolder):
-            msg = (
-                "The 'Find-GCP-Repo' folder already exists in the Resources directory.\n"
-                "Would you like to delete it and clone again (overwrite)?"
-            )
-            if not slicer.util.confirmYesNoDisplay(msg):
-                slicer.util.infoDisplay("Using existing clone; no changes made.")
-                if os.path.isfile(localGCPFindScript):
-                    self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
-                    slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
-                else:
-                    slicer.util.warningDisplay(
-                        f"Existing clone found, but {localGCPFindScript} does not exist.\n"
-                        "Please pick the correct script manually."
-                    )
-                return
-            else:
-                try:
-                    shutil.rmtree(cloneFolder)
-                except Exception as e:
-                    slicer.util.errorDisplay(
-                        f"Failed to remove existing cloned folder:\n{cloneFolder}\nError: {str(e)}"
-                    )
-                    return
-
-        slicer.util.infoDisplay(
-            f"Cloning the entire Find-GCP repo to:\n{cloneFolder}\nPlease wait...",
-            autoCloseMsec=3000
-        )
-        try:
-            git.Repo.clone_from(
-                url="https://github.com/zsiki/Find-GCP.git",
-                to_path=cloneFolder
-            )
-        except Exception as e:
-            slicer.util.errorDisplay(f"Failed to clone Find-GCP repo:\n{str(e)}")
-            return
-
-        if not os.path.isfile(localGCPFindScript):
-            slicer.util.warningDisplay(
-                f"Repo cloned, but {localGCPFindScript} was not found.\n"
-                "Please check the repo contents or specify the correct script."
-            )
-            return
-
-        self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
-        slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
 
     def createCustomLayout(self):
         customLayout = """
@@ -718,12 +525,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         redComp = lm.sliceWidget('Red').sliceLogic().GetSliceCompositeNode()
         redComp.SetBackgroundVolumeID(self.masterVolumeNode.GetID())
         redComp.SetLabelVolumeID(self.masterLabelMapNode.GetID())
-        # redComp.SetForegroundVolumeID(self.emptyNode.GetID())
 
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
         red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
-        # red2Comp.SetForegroundVolumeID(self.emptyNode.GetID())
 
     def onFindGCPScriptChanged(self, newPath):
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
@@ -958,7 +763,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         st = self.imageStates[self.currentImageIndex]["state"]
         self.removeBboxLines()
 
-        colorArrDown, grayArrDown = self.getDownsampledColorAndGray(self.currentSet, self.currentImageIndex)
+        # Retrieve the downsampled color only
+        colorArrDown = self.getDownsampledColor(self.currentSet, self.currentImageIndex)
 
         colorArrDownRGBA = colorArrDown[np.newaxis, ...]
         slicer.util.updateVolumeFromArray(self.masterVolumeNode, colorArrDownRGBA)
@@ -983,25 +789,25 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red').sliceLogic().FitSliceToAll()
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
-    def getDownsampledColorAndGray(self, setName, index):
+    def getDownsampledColor(self, setName, index):
+        """
+        Downsample only the color array (no grayscale).
+        """
         downKey = (setName, index, 'down')
         if downKey in self.imageCache:
-            entry = self.imageCache[downKey]
-            return entry['color'], entry['gray']
+            return self.imageCache[downKey]
 
         fullColor = self.getFullColorArray(setName, index)
-
         import cv2
         h, w, _ = fullColor.shape
         newW = int(w * self.downsampleFactor)
         newH = int(h * self.downsampleFactor)
         colorDown = cv2.resize(fullColor, (newW, newH), interpolation=cv2.INTER_AREA)
-        grayDown = np.mean(colorDown, axis=2).astype(np.uint8)
 
         if len(self.imageCache) >= self.maxCacheSize:
             self.evictOneFromCache()
-        self.imageCache[downKey] = {'color': colorDown, 'gray': grayDown}
-        return colorDown, grayDown
+        self.imageCache[downKey] = colorDown
+        return colorDown
 
     def getFullColorArray(self, setName, index):
         fullKey = (setName, index, 'full')
@@ -1013,6 +819,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         im = Image.open(path).convert('RGB')
         colorArr = np.array(im)
 
+        # Flip up-down and left-right to match how Slicer uses array data
         colorArr = np.flipud(colorArr)
         colorArr = np.fliplr(colorArr)
 
@@ -1064,9 +871,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         cpy = colorArrDown.copy()
         cpy[labelDown == 0] = 0
-        # grayMaskedDown = np.mean(cpy, axis=2).astype(np.uint8)
         cpyRGBA = cpy[np.newaxis, ...]
-
         slicer.util.updateVolumeFromArray(self.masterMaskedVolumeNode, cpyRGBA)
 
         lm = slicer.app.layoutManager()
@@ -1098,8 +903,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         maskArr = np.fliplr(maskArr)
 
         if downsample:
-            colorDown, _ = self.getDownsampledColorAndGray(setName, index)
-            hD, wD = colorDown.shape[:2]
+            colorDown = self.getDownsampledColor(setName, index)
+            hD, wD, _ = colorDown.shape
             import cv2
             maskDown = cv2.resize(maskArr, (wD, hD), interpolation=cv2.INTER_NEAREST)
             if len(self.imageCache) >= self.maxCacheSize:
@@ -1361,7 +1166,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         x_minD, y_minD, x_maxD, y_maxD = bboxDown
 
         fullArr = self.getFullColorArray(setName, index)
-        downArr, _ = self.getDownsampledColorAndGray(setName, index)
+        downArr = self.getDownsampledColor(setName, index)
 
         fullH, fullW, _ = fullArr.shape
         downH, downW, _ = downArr.shape
@@ -1705,27 +1510,247 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         return shortName
 
     def onRunWebODMTask(self):
-        import glob
-        from pyodm import Node
-
+        """
+        We keep the same signature, but the actual WebODM logic is delegated
+        to our SlicerWebODMManager. This preserves your UI flow.
+        """
+        # First replicate the existing check:
         if not self.allSetsHavePhysicalMasks():
             slicer.util.warningDisplay("Not all images have masks. Please mask all sets first.")
             return
 
-        node_ip = self.nodeIPLineEdit.text.strip()
-        node_port = self.nodePortSpinBox.value
+        # Now hand off to the manager for the actual logic
+        self.webODMManager.onRunWebODMTask()
+
+
+    def onCloneFindGCPClicked(self):
+        import os, shutil
+        import slicer
+
+        try:
+            import git
+        except ImportError:
+            slicer.util.pip_install("GitPython")
+            import git  # try again
+
+        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+        resourcesFolder = os.path.join(modulePath, 'Resources')
+        os.makedirs(resourcesFolder, exist_ok=True)
+
+        cloneFolder = os.path.join(resourcesFolder, "Find-GCP-Repo")
+        localGCPFindScript = os.path.join(cloneFolder, "gcp_find.py")
+
+        if os.path.isdir(cloneFolder):
+            msg = (
+                "The 'Find-GCP-Repo' folder already exists in the Resources directory.\n"
+                "Would you like to delete it and clone again (overwrite)?"
+            )
+            if not slicer.util.confirmYesNoDisplay(msg):
+                slicer.util.infoDisplay("Using existing clone; no changes made.")
+                if os.path.isfile(localGCPFindScript):
+                    self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
+                    slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+                else:
+                    slicer.util.warningDisplay(
+                        f"Existing clone found, but {localGCPFindScript} does not exist.\n"
+                        "Please pick the correct script manually."
+                    )
+                return
+            else:
+                try:
+                    shutil.rmtree(cloneFolder)
+                except Exception as e:
+                    slicer.util.errorDisplay(
+                        f"Failed to remove existing cloned folder:\n{cloneFolder}\nError: {str(e)}"
+                    )
+                    return
+
+        slicer.util.infoDisplay(
+            f"Cloning the entire Find-GCP repo to:\n{cloneFolder}\nPlease wait...",
+            autoCloseMsec=3000
+        )
+        try:
+            git.Repo.clone_from(
+                url="https://github.com/zsiki/Find-GCP.git",
+                to_path=cloneFolder
+            )
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to clone Find-GCP repo:\n{str(e)}")
+            return
+
+        if not os.path.isfile(localGCPFindScript):
+            slicer.util.warningDisplay(
+                f"Repo cloned, but {localGCPFindScript} was not found.\n"
+                "Please check the repo contents or specify the correct script."
+            )
+            return
+
+        self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
+        slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+
+
+class SlicerWebODMManager:
+    """
+    New manager class dedicated to WebODM-related functionality:
+     - Checking Docker / WebODM status
+     - Installing / Re-installing WebODM
+     - Relaunching a container with GPU support
+     - Creating / monitoring a pyodm Task
+     - Downloading results on completion
+     - Stopping task monitoring
+    """
+
+    def __init__(self, widget):
+        """
+        We store references to the main widget so we can access UI elements,
+        directory paths, and shared logic. The widget's 'onRunWebODMTask'
+        method calls self.onRunWebODMTask() below, etc.
+        """
+        self.widget = widget  # SlicerPhotogrammetryWidget instance
+
+        # We'll store our pyodm references here
+        self.webodmTask = None
+        self.webodmOutDir = None
+        self.webodmTimer = None
+
+        # Keep track of the last line index for output
+        self.lastWebODMOutputLineIndex = 0
+
+    def onCheckWebODMStatusClicked(self):
+        """
+        Check if Docker is installed, see if anything is on port 3002,
+        and if so, auto-populate IP/port in the UI.
+        """
+        try:
+            subprocess.run(["docker", "--version"], check=True, capture_output=True)
+        except Exception as e:
+            slicer.util.warningDisplay(
+                f"Docker not found or not in PATH.\nError: {str(e)}\nPlease install Docker first."
+            )
+            return
+
+        from pyodm import Node
+        ip_test = "10.40.20.25"
+        port_test = 3002
+        try:
+            test_node = Node(ip_test, port_test)
+            info = test_node.info()
+            slicer.util.infoDisplay("WebODM node found on 10.40.20.25:3002.\nAuto-populating IP & Port.")
+            self.widget.nodeIPLineEdit.setText(ip_test)
+            self.widget.nodePortSpinBox.setValue(port_test)
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", ip_test)
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", str(port_test))
+        except Exception:
+            slicer.util.infoDisplay("No WebODM node found on port 3002. You can install/launch below.")
+
+    def onInstallWebODMClicked(self):
+        """
+        Install or re-install WebODM (GPU-based) in widget.webODMLocalFolder.
+        For demonstration, we only do docker pull of 'opendronemap/nodeodm:gpu'.
+        """
+        localFolder = self.widget.webODMLocalFolder
+        if os.path.isdir(localFolder):
+            msg = (
+                f"A WebODM folder already exists at:\n{localFolder}\n"
+                "Delete it and reinstall?"
+            )
+            if not slicer.util.confirmYesNoDisplay(msg):
+                slicer.util.infoDisplay("Using existing WebODM directory. No changes made.")
+                return
+            else:
+                try:
+                    shutil.rmtree(localFolder)
+                except Exception as e:
+                    slicer.util.errorDisplay(f"Failed to remove old WebODM folder:\n{str(e)}")
+                    return
+        os.makedirs(localFolder, exist_ok=True)
+
+        slicer.util.infoDisplay("Pulling WebODM GPU Docker image. This can take a while...")
+        try:
+            process = subprocess.Popen(
+                ["docker", "pull", "opendronemap/nodeodm:gpu"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            for line in process.stdout:
+                logging.info(line.strip())
+
+            for line in process.stderr:
+                logging.error(line.strip())
+
+            return_code = process.wait()
+            if return_code == 0:
+                slicer.util.infoDisplay("WebODM (GPU) image pulled successfully.")
+            else:
+                slicer.util.errorDisplay(
+                    f"Docker pull failed. Exit code: {return_code}. Check the log for details."
+                )
+        except Exception as e:
+            slicer.util.errorDisplay(f"Docker pull failed: {str(e)}")
+
+    def onRelaunchWebODMClicked(self):
+        """
+        Stop any container on port 3002, then launch WebODM with GPU support on 3002.
+        """
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
+                capture_output=True, text=True
+            )
+            container_ids = result.stdout.strip().split()
+            for cid in container_ids:
+                if cid:
+                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
+                    subprocess.run(["docker", "stop", cid], check=True)
+        except Exception as e:
+            slicer.util.warningDisplay(f"Error stopping old container(s): {str(e)}")
+
+        local_folder = self.widget.webODMLocalFolder
+        try:
+            if not os.path.isdir(local_folder):
+                slicer.util.infoDisplay("Creating webODM Directory")
+                os.makedirs(local_folder, exist_ok=True)
+
+            slicer.util.infoDisplay("Launching new WebODM container on port 3002 with GPU support...")
+            cmd = [
+                "docker", "run", "--rm", "-d",
+                "-p", "3002:3000",
+                "--gpus", "all",
+                "--name", "slicer-webodm-3002",
+                "-v", f"{local_folder}:/webodm_data",
+                "opendronemap/nodeodm:gpu"
+            ]
+            subprocess.run(cmd, check=True)
+
+            slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
+            self.widget.nodeIPLineEdit.setText("10.40.20.25")
+            self.widget.nodePortSpinBox.setValue(3002)
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "10.40.20.25")
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", "3002")
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
+
+    def onRunWebODMTask(self):
+        """
+        Creates and runs the pyodm Task, then starts a QTimer to monitor it.
+        """
+        from pyodm import Node
+
+        node_ip = self.widget.nodeIPLineEdit.text.strip()
+        node_port = self.widget.nodePortSpinBox.value
         try:
             node = Node(node_ip, node_port)
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to connect to Node at {node_ip}:{node_port}\n{str(e)}")
             return
 
-        masterFolder = self.masterFolderSelector.directory
+        masterFolder = self.widget.masterFolderSelector.directory
         if not masterFolder or not os.path.isdir(masterFolder):
             slicer.util.errorDisplay("Master folder is invalid. Aborting.")
             return
 
-        outputFolder = self.outputFolderSelector.directory
+        outputFolder = self.widget.outputFolderSelector.directory
         if not outputFolder or not os.path.isdir(outputFolder):
             slicer.util.errorDisplay("Output folder is invalid. Aborting.")
             return
@@ -1752,8 +1777,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         else:
             slicer.util.infoDisplay("No combined_gcp_list.txt found. Proceeding without GCP...")
 
-        params = dict(self.baselineParams)
-        for factorName, combo in self.factorComboBoxes.items():
+        params = dict(self.widget.baselineParams)
+        for factorName, combo in self.widget.factorComboBoxes.items():
             chosen_str = combo.currentText
             if factorName == "ignore-gsd":
                 params["ignore-gsd"] = (chosen_str.lower() == "true")
@@ -1763,7 +1788,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 except:
                     params[factorName] = chosen_str
 
-        shortTaskName = self.generateShortTaskName("SlicerReconstruction", params)
+        shortTaskName = self.widget.generateShortTaskName("SlicerReconstruction", params)
         slicer.util.infoDisplay("Creating WebODM Task (non-blocking). Upload may take time...")
 
         try:
@@ -1777,14 +1802,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.webodmOutDir = os.path.join(outputFolder, f"WebODM_{shortTaskName}")
         os.makedirs(self.webodmOutDir, exist_ok=True)
 
-        self.webodmLogTextEdit.clear()
-        self.stopMonitoringButton.setEnabled(True)
+        self.widget.webodmLogTextEdit.clear()
+        self.widget.stopMonitoringButton.setEnabled(True)
 
         self.lastWebODMOutputLineIndex = 0
 
         if self.webodmTimer:
             self.webodmTimer.stop()
             self.webodmTimer.deleteLater()
+
         self.webodmTimer = qt.QTimer()
         self.webodmTimer.setInterval(5000)
         self.webodmTimer.timeout.connect(self.checkWebODMTaskStatus)
@@ -1797,8 +1823,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.webodmTimer = None
         self.webodmTask = None
         self.webodmOutDir = None
-        self.stopMonitoringButton.setEnabled(False)
-        self.webodmLogTextEdit.append("Stopped monitoring.")
+        self.widget.stopMonitoringButton.setEnabled(False)
+        self.widget.webodmLogTextEdit.append("Stopped monitoring.")
 
     def checkWebODMTaskStatus(self):
         if not self.webodmTask:
@@ -1806,25 +1832,25 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         try:
             info = self.webodmTask.info(with_output=self.lastWebODMOutputLineIndex)
         except Exception as e:
-            self.webodmLogTextEdit.append(f"Error retrieving task info: {str(e)}")
+            self.widget.webodmLogTextEdit.append(f"Error retrieving task info: {str(e)}")
             slicer.app.processEvents()
             return
 
         newLines = info.output or []
         if len(newLines) > 0:
             for line in newLines:
-                self.webodmLogTextEdit.append(line)
+                self.widget.webodmLogTextEdit.append(line)
             self.lastWebODMOutputLineIndex += len(newLines)
 
-        self.webodmLogTextEdit.append(f"Status: {info.status.name}, Progress: {info.progress}%")
-        cursor = self.webodmLogTextEdit.textCursor()
+        self.widget.webodmLogTextEdit.append(f"Status: {info.status.name}, Progress: {info.progress}%")
+        cursor = self.widget.webodmLogTextEdit.textCursor()
         cursor.movePosition(qt.QTextCursor.End)
-        self.webodmLogTextEdit.setTextCursor(cursor)
-        self.webodmLogTextEdit.ensureCursorVisible()
+        self.widget.webodmLogTextEdit.setTextCursor(cursor)
+        self.widget.webodmLogTextEdit.ensureCursorVisible()
         slicer.app.processEvents()
 
         if info.status.name.lower() == "completed":
-            self.webodmLogTextEdit.append(f"Task completed! Downloading results to {self.webodmOutDir} ...")
+            self.widget.webodmLogTextEdit.append(f"Task completed! Downloading results to {self.webodmOutDir} ...")
             slicer.app.processEvents()
             try:
                 self.webodmTask.download_assets(self.webodmOutDir)
@@ -1838,9 +1864,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 self.webodmTimer = None
             self.webodmTask = None
             self.webodmOutDir = None
-            self.stopMonitoringButton.setEnabled(False)
+            self.widget.stopMonitoringButton.setEnabled(False)
         elif info.status.name.lower() in ["failed", "canceled"]:
-            self.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
+            self.widget.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
             slicer.app.processEvents()
             if self.webodmTimer:
                 self.webodmTimer.stop()
@@ -1848,7 +1874,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 self.webodmTimer = None
             self.webodmTask = None
             self.webodmOutDir = None
-            self.stopMonitoringButton.setEnabled(False)
+            self.widget.stopMonitoringButton.setEnabled(False)
 
 
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
