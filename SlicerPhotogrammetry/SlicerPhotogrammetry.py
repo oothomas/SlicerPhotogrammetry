@@ -14,13 +14,6 @@ from slicer.ScriptedLoadableModule import *
 from typing import List
 
 
-# def getWeights(filename):
-#     """Unused in logic; we do check_and_download_weights instead."""
-#     modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
-#     resourcePath = os.path.join(modulePath, 'Resources', filename)
-#     return resourcePath
-
-
 class SlicerPhotogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
@@ -398,8 +391,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             logging.debug(
                 'SlicerPhotogrammetry requires the PyTorch Python package. Installing... (it may take several '
                 'minutes)')
-            torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')  # ,
-            # torchvisionVersionRequirement=">=0.13")
+            torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
 
             if torch:
                 # Ask user to restart 3D Slicer
@@ -771,7 +763,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         st = self.imageStates[self.currentImageIndex]["state"]
         self.removeBboxLines()
 
-        colorArrDown, grayArrDown = self.getDownsampledColorAndGray(self.currentSet, self.currentImageIndex)
+        # Retrieve the downsampled color only
+        colorArrDown = self.getDownsampledColor(self.currentSet, self.currentImageIndex)
 
         colorArrDownRGBA = colorArrDown[np.newaxis, ...]
         slicer.util.updateVolumeFromArray(self.masterVolumeNode, colorArrDownRGBA)
@@ -796,25 +789,25 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red').sliceLogic().FitSliceToAll()
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
-    def getDownsampledColorAndGray(self, setName, index):
+    def getDownsampledColor(self, setName, index):
+        """
+        Downsample only the color array (no grayscale).
+        """
         downKey = (setName, index, 'down')
         if downKey in self.imageCache:
-            entry = self.imageCache[downKey]
-            return entry['color'], entry['gray']
+            return self.imageCache[downKey]
 
         fullColor = self.getFullColorArray(setName, index)
-
         import cv2
         h, w, _ = fullColor.shape
         newW = int(w * self.downsampleFactor)
         newH = int(h * self.downsampleFactor)
         colorDown = cv2.resize(fullColor, (newW, newH), interpolation=cv2.INTER_AREA)
-        grayDown = np.mean(colorDown, axis=2).astype(np.uint8)
 
         if len(self.imageCache) >= self.maxCacheSize:
             self.evictOneFromCache()
-        self.imageCache[downKey] = {'color': colorDown, 'gray': grayDown}
-        return colorDown, grayDown
+        self.imageCache[downKey] = colorDown
+        return colorDown
 
     def getFullColorArray(self, setName, index):
         fullKey = (setName, index, 'full')
@@ -910,8 +903,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         maskArr = np.fliplr(maskArr)
 
         if downsample:
-            colorDown, _ = self.getDownsampledColorAndGray(setName, index)
-            hD, wD = colorDown.shape[:2]
+            colorDown = self.getDownsampledColor(setName, index)
+            hD, wD, _ = colorDown.shape
             import cv2
             maskDown = cv2.resize(maskArr, (wD, hD), interpolation=cv2.INTER_NEAREST)
             if len(self.imageCache) >= self.maxCacheSize:
@@ -1173,7 +1166,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         x_minD, y_minD, x_maxD, y_maxD = bboxDown
 
         fullArr = self.getFullColorArray(setName, index)
-        downArr, _ = self.getDownsampledColorAndGray(setName, index)
+        downArr = self.getDownsampledColor(setName, index)
 
         fullH, fullW, _ = fullArr.shape
         downH, downW, _ = downArr.shape
@@ -1628,7 +1621,6 @@ class SlicerWebODMManager:
         Check if Docker is installed, see if anything is on port 3002,
         and if so, auto-populate IP/port in the UI.
         """
-        # 1) Check Docker
         try:
             subprocess.run(["docker", "--version"], check=True, capture_output=True)
         except Exception as e:
@@ -1637,7 +1629,6 @@ class SlicerWebODMManager:
             )
             return
 
-        # 2) Check port 3002
         from pyodm import Node
         ip_test = "10.40.20.25"
         port_test = 3002
@@ -1674,7 +1665,6 @@ class SlicerWebODMManager:
                     return
         os.makedirs(localFolder, exist_ok=True)
 
-        # Pull GPU-based Docker image
         slicer.util.infoDisplay("Pulling WebODM GPU Docker image. This can take a while...")
         try:
             process = subprocess.Popen(
@@ -1683,15 +1673,12 @@ class SlicerWebODMManager:
                 stderr=subprocess.PIPE,
                 text=True
             )
-            # Read standard output line by line and log it
             for line in process.stdout:
                 logging.info(line.strip())
 
-            # Read standard error line by line and log it as error
             for line in process.stderr:
                 logging.error(line.strip())
 
-            # Wait for the process to complete
             return_code = process.wait()
             if return_code == 0:
                 slicer.util.infoDisplay("WebODM (GPU) image pulled successfully.")
@@ -1706,7 +1693,6 @@ class SlicerWebODMManager:
         """
         Stop any container on port 3002, then launch WebODM with GPU support on 3002.
         """
-        # Stop old containers on 3002
         try:
             result = subprocess.run(
                 ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
@@ -1720,7 +1706,6 @@ class SlicerWebODMManager:
         except Exception as e:
             slicer.util.warningDisplay(f"Error stopping old container(s): {str(e)}")
 
-        # Launch
         local_folder = self.widget.webODMLocalFolder
         try:
             if not os.path.isdir(local_folder):
@@ -1739,7 +1724,6 @@ class SlicerWebODMManager:
             subprocess.run(cmd, check=True)
 
             slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
-            # Auto-populate
             self.widget.nodeIPLineEdit.setText("10.40.20.25")
             self.widget.nodePortSpinBox.setValue(3002)
             slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "10.40.20.25")
@@ -1750,10 +1734,7 @@ class SlicerWebODMManager:
     def onRunWebODMTask(self):
         """
         Creates and runs the pyodm Task, then starts a QTimer to monitor it.
-        The widget's onRunWebODMTask method calls here after it verifies
-        that all images have physical masks.
         """
-        import glob
         from pyodm import Node
 
         node_ip = self.widget.nodeIPLineEdit.text.strip()
@@ -1774,7 +1755,6 @@ class SlicerWebODMManager:
             slicer.util.errorDisplay("Output folder is invalid. Aborting.")
             return
 
-        # Gather all masked color JPGs and mask JPGs
         all_masked_color_jpgs = []
         all_mask_jpgs = []
         for root, dirs, files in os.walk(outputFolder):
@@ -1797,7 +1777,6 @@ class SlicerWebODMManager:
         else:
             slicer.util.infoDisplay("No combined_gcp_list.txt found. Proceeding without GCP...")
 
-        # Build WebODM params from baseline + factor combos
         params = dict(self.widget.baselineParams)
         for factorName, combo in self.widget.factorComboBoxes.items():
             chosen_str = combo.currentText
