@@ -45,6 +45,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
 
+        self.imageIndexLabel = None
         self.logic = None
         self.vtkLogFilter = None
         self.logger = None
@@ -78,9 +79,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.buttonsToManage = []
         self.prevButton = None
         self.nextButton = None
-        self.maskButton = None
-        self.doneButton = None
-        self.imageIndexLabel = None
+
+        # CHANGED: We no longer have a separate Done button. We will combine finalizing ROI + masking
+        # into a single ?Mask Current Image? button:
+        self.maskCurrentImageButton = None
+
         self.maskAllImagesButton = None
         self.maskAllProgressBar = None
         self.processButton = None
@@ -209,26 +212,46 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addWidget(self.placeBoundingBoxButton)
         self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
 
-        self.doneButton = qt.QPushButton("Done")
-        self.doneButton.enabled = False
-        parametersFormLayout.addWidget(self.doneButton)
-        self.doneButton.connect('clicked(bool)', self.onDoneClicked)
+        # CHANGED: Remove old Done button references. We combine bounding-box finalization + masking
+        # in one step. So no separate ?Done? button in the UI now.
 
-        self.maskButton = qt.QPushButton("Mask Current Image")
-        self.maskButton.enabled = False
-        parametersFormLayout.addWidget(self.maskButton)
-        self.maskButton.connect('clicked(bool)', self.onMaskClicked)
+        # NEW: Renamed the old separate "Mask Current Image" button to a single combined step:
+        self.maskCurrentImageButton = qt.QPushButton("Mask Current Image")
+        self.maskCurrentImageButton.enabled = False
+        parametersFormLayout.addWidget(self.maskCurrentImageButton)
+        # This new method merges the old ?onDoneClicked? + ?onMaskClicked? logic
+        self.maskCurrentImageButton.connect('clicked(bool)', self.onMaskCurrentImageClicked)
 
-        navLayout = qt.QHBoxLayout()
-        self.prevButton = qt.QPushButton("<-")
-        self.nextButton = qt.QPushButton("->")
-        self.imageIndexLabel = qt.QLabel("[Image 0]")
+        navLayout = qt.QGridLayout()
+
+        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+        prevIconPath = os.path.join(modulePath, 'Resources/Icons', 'Previous.png')
+        nextIconPath = os.path.join(modulePath, 'Resources/Icons', 'Next.png')
+
+        # Previous Button with Icon
+        self.prevButton = qt.QPushButton("<")
+        #prevIcon = qt.QIcon(qt.QPixmap(prevIconPath))
+        #self.prevButton.setIcon(prevIcon)
+        self.prevButton.setToolTip("Go to the previous image")
+
+        # Previous Button with Icon
+        self.nextButton = qt.QPushButton(">")
+        #nextIcon = qt.QIcon(qt.QPixmap(nextIconPath))
+        #self.nextButton.setIcon(nextIcon)
+        self.nextButton.setToolTip("Go to the next image")
+
+        # Image Index Label
+        self.imageIndexLabel = qt.QLabel("Image 0")
+        self.imageIndexLabel.setAlignment(qt.Qt.AlignCenter)
+
         self.prevButton.enabled = False
         self.nextButton.enabled = False
-        navLayout.addWidget(self.prevButton)
-        navLayout.addWidget(self.imageIndexLabel)
-        navLayout.addWidget(self.nextButton)
-        parametersFormLayout.addRow(navLayout)
+
+        navLayout.addWidget(self.prevButton, 0, 0)
+        navLayout.addWidget(self.imageIndexLabel, 0, 1)
+        navLayout.addWidget(self.nextButton, 0, 2)
+
+        parametersFormLayout.addRow("    ", navLayout)
         self.prevButton.connect('clicked(bool)', self.onPrevImage)
         self.nextButton.connect('clicked(bool)', self.onNextImage)
 
@@ -252,8 +275,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.processButton,
             self.imageSetComboBox,
             self.placeBoundingBoxButton,
-            self.doneButton,
-            self.maskButton,
+            self.maskCurrentImageButton,
             self.maskAllImagesButton,
             self.prevButton,
             self.nextButton
@@ -329,7 +351,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.launchWebODMTaskButton = qt.QPushButton("Run WebODM Task With Selected Parameters (non-blocking)")
         webodmTaskFormLayout.addWidget(self.launchWebODMTaskButton)
         self.launchWebODMTaskButton.setEnabled(False)
-        # NOTE: The actual logic to start the task is now delegated to the manager, but we keep the UI binding here.
         self.launchWebODMTaskButton.connect('clicked(bool)', self.onRunWebODMTask)
 
         self.webodmLogTextEdit = qt.QTextEdit()
@@ -341,22 +362,19 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
 
         ###
-        # (D) NEW SECTION: Manage WebODM Installation & Launch
+        # (D) NEW SECTION: Manage WebODM (Install/Launch)
         ###
         manageWODMCollapsibleButton = ctk.ctkCollapsibleButton()
         manageWODMCollapsibleButton.text = "Manage WebODM (Install/Launch)"
         self.layout.addWidget(manageWODMCollapsibleButton)
         manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsibleButton)
 
-        # Button to check if WebODM is installed/running
         self.webODMCheckStatusButton = qt.QPushButton("Check WebODM Status on port 3002")
         manageWODMFormLayout.addWidget(self.webODMCheckStatusButton)
 
-        # Button to install or reinstall
         self.webODMInstallButton = qt.QPushButton("Install/Reinstall WebODM (GPU)")
         manageWODMFormLayout.addWidget(self.webODMInstallButton)
 
-        # Button to re-launch
         self.webODMRelaunchButton = qt.QPushButton("Relaunch WebODM on Port 3002")
         manageWODMFormLayout.addWidget(self.webODMRelaunchButton)
 
@@ -635,12 +653,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageSetComboBox.enabled = False
 
         self.placeBoundingBoxButton.enabled = False
-        self.doneButton.enabled = False
-        self.maskButton.enabled = False
+        self.maskCurrentImageButton.enabled = False
         self.maskAllImagesButton.enabled = False
         self.prevButton.enabled = False
         self.nextButton.enabled = False
-        self.imageIndexLabel.setText("[Image 0]")
+        self.imageIndexLabel.setText("Image 0")
 
         self.launchWebODMTaskButton.setEnabled(False)
         self.maskedCountLabel.setText("Masked: 0/0")
@@ -694,8 +711,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
             self.updateVolumeDisplay()
             self.placeBoundingBoxButton.enabled = True
-            self.doneButton.enabled = False
-            self.maskButton.enabled = False
+            self.maskCurrentImageButton.enabled = False
             self.maskAllImagesButton.enabled = False
             self.prevButton.enabled = (len(self.imagePaths) > 1)
             self.nextButton.enabled = (len(self.imagePaths) > 1)
@@ -756,7 +772,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateWebODMTaskAvailability()
 
     def updateVolumeDisplay(self):
-        self.imageIndexLabel.setText(f"[Image {self.currentImageIndex}]")
+        self.imageIndexLabel.setText(f"Image {self.currentImageIndex}")
         if self.currentImageIndex < 0 or self.currentImageIndex >= len(self.imagePaths):
             return
 
@@ -771,17 +787,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         if st == "none":
             self.showOriginalOnly()
-            self.doneButton.enabled = False
-            self.maskButton.enabled = False
+            self.maskCurrentImageButton.enabled = False
         elif st == "bbox":
             self.showOriginalOnly()
             self.drawBboxLines(self.imageStates[self.currentImageIndex]["bboxCoords"])
-            self.doneButton.enabled = False
-            self.maskButton.enabled = True
+            self.maskCurrentImageButton.enabled = True
         elif st == "masked":
             self.showMaskedState(colorArrDown, self.currentImageIndex)
-            self.doneButton.enabled = False
-            self.maskButton.enabled = False
+            self.maskCurrentImageButton.enabled = False
 
         self.enableMaskAllImagesIfPossible()
 
@@ -835,14 +848,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def refreshButtonStatesBasedOnCurrentState(self):
         st = self.imageStates[self.currentImageIndex]["state"]
         if st == "none":
-            self.doneButton.enabled = False
-            self.maskButton.enabled = False
+            self.maskCurrentImageButton.enabled = False
         elif st == "bbox":
-            self.doneButton.enabled = False
-            self.maskButton.enabled = True
+            self.maskCurrentImageButton.enabled = True
         elif st == "masked":
-            self.doneButton.enabled = False
-            self.maskButton.enabled = False
+            self.maskCurrentImageButton.enabled = False
         self.enableMaskAllImagesIfPossible()
 
     def enableMaskAllImagesIfPossible(self):
@@ -927,207 +937,36 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.currentImageIndex += 1
             self.updateVolumeDisplay()
 
-    def onPlaceBoundingBoxClicked(self):
-        self.storeCurrentButtonStates()
-        self.disableAllButtonsExceptDone()
-
+    # --------------------------------------------------------------------------------
+    # CHANGED: Instead of "onDoneClicked" + "onMaskClicked," we create one combined
+    #          method "onMaskCurrentImageClicked".
+    # --------------------------------------------------------------------------------
+    def onMaskCurrentImageClicked(self):
+        """
+        This combines the bounding-box-finalization code and the masking code into a single step.
+        If the user has placed an ROI but hasn't finalized it yet, we finalize it (like old onDoneClicked)
+        and then proceed to mask (like old onMaskClicked).
+        """
         stInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stInfo:
+            slicer.util.warningDisplay("No image state found. Please select a valid image.")
             return
-        s = stInfo["state"]
 
-        if s == "masked":
-            if slicer.util.confirmYesNoDisplay(
-                    "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
-            ):
-                self.removeMaskFromCurrentImage()
-                self.startPlacingROI()
-            else:
-                self.restoreButtonStates()
-        elif s == "bbox":
-            if slicer.util.confirmYesNoDisplay(
-                    "A bounding box already exists. Creating a new one will remove it. Proceed?"
-            ):
-                self.removeBboxFromCurrentImage()
-                self.startPlacingROI()
-            else:
-                self.restoreButtonStates()
-        elif s == "none":
-            self.startPlacingROI()
-
-    def storeCurrentButtonStates(self):
-        self.previousButtonStates = {}
-        for b in self.buttonsToManage:
-            if isinstance(b, qt.QComboBox):
-                self.previousButtonStates[b] = b.isEnabled()
-            else:
-                self.previousButtonStates[b] = b.enabled
-
-    def restoreButtonStates(self):
-        for b, val in self.previousButtonStates.items():
-            if isinstance(b, qt.QComboBox):
-                b.setEnabled(val)
-            else:
-                b.enabled = val
-
-    def disableAllButtonsExceptDone(self):
-        for b in self.buttonsToManage:
-            if b != self.doneButton:
-                if isinstance(b, qt.QComboBox):
-                    b.setEnabled(False)
-                else:
-                    b.enabled = False
-
-    def startPlacingROI(self):
-        self.removeBboxLines()
+        currentState = stInfo["state"]
+        # If we do have an ROI node still in the scene, let's finalize bounding box:
         if self.boundingBoxRoiNode:
-            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
-            self.boundingBoxRoiNode = None
+            self.finalizeBoundingBoxAndRemoveROI()
+            # after finalize, we set it to "bbox", so we can proceed
 
-        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", "BoundingBoxROI")
-        self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
-        dnode = self.boundingBoxRoiNode.GetDisplayNode()
-        dnode.SetVisibility(True)
-        dnode.SetHandlesInteractive(True)
-
-        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsROINode")
-        selectionNode.SetActivePlaceNodeID(self.boundingBoxRoiNode.GetID())
-        interactionNode.SetPlaceModePersistence(1)
-        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
-
-        self.boundingBoxRoiNode.AddObserver(
-            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.checkROIPlacementComplete
-        )
-        slicer.util.infoDisplay(
-            "Draw the ROI and use the handles to adjust it. Click 'Done' when satisfied.",
-            autoCloseMsec=5000
-        )
-
-        self.doneButton.enabled = True
-        self.maskButton.enabled = False
-
-    def checkROIPlacementComplete(self, caller, event):
-        if not self.boundingBoxRoiNode:
-            return
-        if self.boundingBoxRoiNode.GetControlPointPlacementComplete():
-            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-            interactionNode.SetPlaceModePersistence(0)
-            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-            slicer.util.infoDisplay(
-                "ROI placement complete. You can now edit the ROI or click 'Done' to finalize.",
-                autoCloseMsec=4000
-            )
-
-    def onDoneClicked(self):
-        if not self.boundingBoxRoiNode:
-            slicer.util.warningDisplay("You must place an ROI first.")
+        # Now do the old "onMaskClicked" logic:
+        stInfo = self.imageStates.get(self.currentImageIndex, None)  # refresh local reference
+        if not stInfo or stInfo["state"] != "bbox":
+            slicer.util.warningDisplay("No bounding box defined or finalized for this image. Cannot mask.")
             return
 
-        coordsDown = self.computeBboxFromROI()
-        self.imageStates[self.currentImageIndex]["state"] = "bbox"
-        self.imageStates[self.currentImageIndex]["bboxCoords"] = coordsDown
-        self.imageStates[self.currentImageIndex]["maskNodes"] = None
-
-        dnode = self.boundingBoxRoiNode.GetDisplayNode()
-        dnode.SetHandlesInteractive(False)
-
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetPlaceModePersistence(0)
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
-        slicer.util.infoDisplay("ROI placement finalized. You can mask now.", autoCloseMsec=4000)
-
-        if self.boundingBoxRoiNode.GetDisplayNode():
-            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
-        slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
-        self.boundingBoxRoiNode = None
-
-        self.doneButton.enabled = False
-        self.maskButton.enabled = True
-        self.updateVolumeDisplay()
-
-        pI = self.currentImageIndex - 1
-        nI = self.currentImageIndex + 1
-        origI = self.currentImageIndex
-        if pI >= 0:
-            self.currentImageIndex = pI
-            self.updateVolumeDisplay()
-            self.currentImageIndex = origI
-            self.updateVolumeDisplay()
-        elif nI < len(self.imagePaths):
-            self.currentImageIndex = nI
-            self.updateVolumeDisplay()
-            self.currentImageIndex = origI
-            self.updateVolumeDisplay()
-
-        self.restoreButtonStates()
-        self.maskButton.enabled = True
-
-    def computeBboxFromROI(self):
-        roiBounds = [0] * 6
-        self.boundingBoxRoiNode.GetBounds(roiBounds)
-        p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]
-        p2 = [roiBounds[1], roiBounds[3], roiBounds[4]]
-
-        rasToIjkMat = vtk.vtkMatrix4x4()
-        self.masterVolumeNode.GetRASToIJKMatrix(rasToIjkMat)
-
-        def rasToIjk(ras):
-            ras4 = [ras[0], ras[1], ras[2], 1.0]
-            ijk4 = rasToIjkMat.MultiplyPoint(ras4)
-            return [int(round(ijk4[0])), int(round(ijk4[1])), int(round(ijk4[2]))]
-
-        p1_ijk = rasToIjk(p1)
-        p2_ijk = rasToIjk(p2)
-        x_min = min(p1_ijk[0], p2_ijk[0])
-        x_max = max(p1_ijk[0], p2_ijk[0])
-        y_min = min(p1_ijk[1], p2_ijk[1])
-        y_max = max(p1_ijk[1], p2_ijk[1])
-        return (x_min, y_min, x_max, y_max)
-
-    def removeBboxFromCurrentImage(self):
-        stInfo = self.imageStates.get(self.currentImageIndex, None)
-        if stInfo:
-            stInfo["state"] = "none"
-            stInfo["bboxCoords"] = None
-            stInfo["maskNodes"] = None
-        self.removeBboxLines()
-
-    def removeMaskFromCurrentImage(self):
-        stInfo = self.imageStates.get(self.currentImageIndex, None)
-        if not stInfo:
-            return
-        if stInfo["maskNodes"]:
-            stInfo["maskNodes"] = None
-
-        self.deleteMaskFile(self.currentImageIndex, self.currentSet)
-        stInfo["state"] = "none"
-        stInfo["bboxCoords"] = None
-
-        self.updateMaskedCounter()
-        self.updateWebODMTaskAvailability()
-        self.updateVolumeDisplay()
-
-    def deleteMaskFile(self, index, setName):
-        outputFolder = self.outputFolderSelector.directory
-        baseName = os.path.splitext(os.path.basename(self.imagePaths[index]))[0]
-        maskPath = os.path.join(outputFolder, setName, f"{baseName}_mask.jpg")
-        if os.path.isfile(maskPath):
-            try:
-                os.remove(maskPath)
-            except Exception as e:
-                print(f"Warning: failed to remove mask file: {maskPath}, error: {str(e)}")
-
-    def onMaskClicked(self):
+        # Actually perform the SAM masking:
         import numpy as np
         import cv2
-
-        stInfo = self.imageStates.get(self.currentImageIndex, None)
-        if not stInfo or stInfo["state"] != "bbox":
-            slicer.util.warningDisplay("No bounding box defined for this image.")
-            return
 
         bboxDown = stInfo["bboxCoords"]
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, self.currentImageIndex)
@@ -1162,23 +1001,38 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    def downBboxToFullBbox(self, bboxDown, setName, index):
-        x_minD, y_minD, x_maxD, y_maxD = bboxDown
+        self.restoreButtonStates()
 
-        fullArr = self.getFullColorArray(setName, index)
-        downArr = self.getDownsampledColor(setName, index)
+        self.enableMaskAllImagesIfPossible()
 
-        fullH, fullW, _ = fullArr.shape
-        downH, downW, _ = downArr.shape
+    def finalizeBoundingBoxAndRemoveROI(self):
+        """ Helper function that duplicates the old 'onDoneClicked' bounding box finalization. """
+        if not self.boundingBoxRoiNode:
+            return
 
-        scaleX = fullW / downW
-        scaleY = fullH / downH
+        coordsDown = self.computeBboxFromROI()
+        stInfo = self.imageStates[self.currentImageIndex]
+        stInfo["state"] = "bbox"
+        stInfo["bboxCoords"] = coordsDown
+        stInfo["maskNodes"] = None
 
-        x_minF = int(round(x_minD * scaleX))
-        x_maxF = int(round(x_maxD * scaleX))
-        y_minF = int(round(y_minD * scaleY))
-        y_maxF = int(round(y_maxD * scaleY))
-        return (x_minF, y_minF, x_maxF, y_maxF)
+        # Turn off handles
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetHandlesInteractive(False)
+
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetPlaceModePersistence(0)
+        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+
+        # If ROI display node still around, remove it
+        if self.boundingBoxRoiNode.GetDisplayNode():
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
+        slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+        self.boundingBoxRoiNode = None
+
+    # --------------------------------------------------------------------------------
+    # End of merged function
+    # --------------------------------------------------------------------------------
 
     def onMaskAllImagesClicked(self):
         stInfo = self.imageStates.get(self.currentImageIndex, None)
@@ -1340,26 +1194,175 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             dnode.SetTextScale(0)
             self.currentBboxLineNodes.append(ln)
 
-    def cleanup(self):
-        self.saveCurrentSetState()
-        if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
-            slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
-        if self.masterLabelMapNode and slicer.mrmlScene.IsNodePresent(self.masterLabelMapNode):
-            slicer.mrmlScene.RemoveNode(self.masterLabelMapNode)
-        if self.masterMaskedVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterMaskedVolumeNode):
-            slicer.mrmlScene.RemoveNode(self.masterMaskedVolumeNode)
-        if self.emptyNode and slicer.mrmlScene.IsNodePresent(self.emptyNode):
-            slicer.mrmlScene.RemoveNode(self.emptyNode)
+    def onPlaceBoundingBoxClicked(self):
+        self.storeCurrentButtonStates()
+        self.disableAllButtonsExceptMask()
 
-        self.masterVolumeNode = None
-        self.masterLabelMapNode = None
-        self.masterMaskedVolumeNode = None
-        self.emptyNode = None
+        stInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stInfo:
+            return
+        s = stInfo["state"]
 
-        if self.logger and self.vtkLogFilter:
-            self.logger.removeFilter(self.vtkLogFilter)
-            self.vtkLogFilter = None
-            self.logger = None
+        if s == "masked":
+            if slicer.util.confirmYesNoDisplay(
+                "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
+            ):
+                self.removeMaskFromCurrentImage()
+                self.startPlacingROI()
+            else:
+                self.restoreButtonStates()
+        elif s == "bbox":
+            if slicer.util.confirmYesNoDisplay(
+                "A bounding box already exists. Creating a new one will remove it. Proceed?"
+            ):
+                self.removeBboxFromCurrentImage()
+                self.startPlacingROI()
+            else:
+                self.restoreButtonStates()
+        elif s == "none":
+            self.startPlacingROI()
+
+    def storeCurrentButtonStates(self):
+        self.previousButtonStates = {}
+        for b in self.buttonsToManage:
+            if isinstance(b, qt.QComboBox):
+                self.previousButtonStates[b] = b.isEnabled()
+            else:
+                self.previousButtonStates[b] = b.enabled
+
+    def restoreButtonStates(self):
+        for b, val in self.previousButtonStates.items():
+            if isinstance(b, qt.QComboBox):
+                b.setEnabled(val)
+            else:
+                b.enabled = val
+
+    def disableAllButtonsExceptMask(self):
+        """
+        Disables all UI elements except the new MaskCurrentImage button,
+        which we keep enabled to let user finalize bounding box once done.
+        """
+        for b in self.buttonsToManage:
+            if b != self.maskCurrentImageButton:
+                if isinstance(b, qt.QComboBox):
+                    b.setEnabled(False)
+                else:
+                    b.enabled = False
+
+    def startPlacingROI(self):
+        self.removeBboxLines()
+        if self.boundingBoxRoiNode:
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+            self.boundingBoxRoiNode = None
+
+        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", "BoundingBoxROI")
+        self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetVisibility(True)
+        dnode.SetHandlesInteractive(True)
+
+        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsROINode")
+        selectionNode.SetActivePlaceNodeID(self.boundingBoxRoiNode.GetID())
+        interactionNode.SetPlaceModePersistence(1)
+        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
+        self.boundingBoxRoiNode.AddObserver(
+            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.checkROIPlacementComplete
+        )
+        slicer.util.infoDisplay(
+            "Draw the ROI and use the handles to adjust it. When done, click 'Mask Current Image' to finalize + mask.",
+            autoCloseMsec=6000
+        )
+
+        # Our single combined button will finalize + mask once user is satisfied
+        self.maskCurrentImageButton.enabled = True
+
+    def checkROIPlacementComplete(self, caller, event):
+        if not self.boundingBoxRoiNode:
+            return
+        if self.boundingBoxRoiNode.GetControlPointPlacementComplete():
+            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+            interactionNode.SetPlaceModePersistence(0)
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+            slicer.util.infoDisplay(
+                "ROI placement complete. You can still edit the ROI or directly click 'Mask Current Image' to finalize.",
+                autoCloseMsec=5000
+            )
+
+    def removeBboxFromCurrentImage(self):
+        stInfo = self.imageStates.get(self.currentImageIndex, None)
+        if stInfo:
+            stInfo["state"] = "none"
+            stInfo["bboxCoords"] = None
+            stInfo["maskNodes"] = None
+        self.removeBboxLines()
+
+    def removeMaskFromCurrentImage(self):
+        stInfo = self.imageStates.get(self.currentImageIndex, None)
+        if not stInfo:
+            return
+        if stInfo["maskNodes"]:
+            stInfo["maskNodes"] = None
+
+        self.deleteMaskFile(self.currentImageIndex, self.currentSet)
+        stInfo["state"] = "none"
+        stInfo["bboxCoords"] = None
+
+        self.updateMaskedCounter()
+        self.updateWebODMTaskAvailability()
+        self.updateVolumeDisplay()
+
+    def deleteMaskFile(self, index, setName):
+        outputFolder = self.outputFolderSelector.directory
+        baseName = os.path.splitext(os.path.basename(self.imagePaths[index]))[0]
+        maskPath = os.path.join(outputFolder, setName, f"{baseName}_mask.jpg")
+        if os.path.isfile(maskPath):
+            try:
+                os.remove(maskPath)
+            except Exception as e:
+                print(f"Warning: failed to remove mask file: {maskPath}, error: {str(e)}")
+
+    def computeBboxFromROI(self):
+        roiBounds = [0] * 6
+        self.boundingBoxRoiNode.GetBounds(roiBounds)
+        p1 = [roiBounds[0], roiBounds[2], roiBounds[4]]
+        p2 = [roiBounds[1], roiBounds[3], roiBounds[4]]
+
+        rasToIjkMat = vtk.vtkMatrix4x4()
+        self.masterVolumeNode.GetRASToIJKMatrix(rasToIjkMat)
+
+        def rasToIjk(ras):
+            ras4 = [ras[0], ras[1], ras[2], 1.0]
+            ijk4 = rasToIjkMat.MultiplyPoint(ras4)
+            return [int(round(ijk4[0])), int(round(ijk4[1])), int(round(ijk4[2]))]
+
+        p1_ijk = rasToIjk(p1)
+        p2_ijk = rasToIjk(p2)
+        x_min = min(p1_ijk[0], p2_ijk[0])
+        x_max = max(p1_ijk[0], p2_ijk[0])
+        y_min = min(p1_ijk[1], p2_ijk[1])
+        y_max = max(p1_ijk[1], p2_ijk[1])
+        return (x_min, y_min, x_max, y_max)
+
+    def downBboxToFullBbox(self, bboxDown, setName, index):
+        x_minD, y_minD, x_maxD, y_maxD = bboxDown
+
+        fullArr = self.getFullColorArray(setName, index)
+        downArr = self.getDownsampledColor(setName, index)
+
+        fullH, fullW, _ = fullArr.shape
+        downH, downW, _ = downArr.shape
+
+        scaleX = fullW / downW
+        scaleY = fullH / downH
+
+        x_minF = int(round(x_minD * scaleX))
+        x_maxF = int(round(x_maxD * scaleX))
+        y_minF = int(round(y_minD * scaleY))
+        y_maxF = int(round(y_maxD * scaleY))
+        return (x_minF, y_minF, x_maxF, y_maxF)
 
     def updateWebODMTaskAvailability(self):
         allSetsMasked = self.allSetsHavePhysicalMasks()
@@ -1512,7 +1515,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def onRunWebODMTask(self):
         """
         We keep the same signature, but the actual WebODM logic is delegated
-        to our SlicerWebODMManager. This preserves your UI flow.
+        to our SlicerWebODMManager. This preserves the UI flow.
         """
         # First replicate the existing check:
         if not self.allSetsHavePhysicalMasks():
@@ -1521,7 +1524,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # Now hand off to the manager for the actual logic
         self.webODMManager.onRunWebODMTask()
-
 
     def onCloneFindGCPClicked(self):
         import os, shutil
@@ -1587,6 +1589,27 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+
+    def cleanup(self):
+        self.saveCurrentSetState()
+        if self.masterVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterVolumeNode):
+            slicer.mrmlScene.RemoveNode(self.masterVolumeNode)
+        if self.masterLabelMapNode and slicer.mrmlScene.IsNodePresent(self.masterLabelMapNode):
+            slicer.mrmlScene.RemoveNode(self.masterLabelMapNode)
+        if self.masterMaskedVolumeNode and slicer.mrmlScene.IsNodePresent(self.masterMaskedVolumeNode):
+            slicer.mrmlScene.RemoveNode(self.masterMaskedVolumeNode)
+        if self.emptyNode and slicer.mrmlScene.IsNodePresent(self.emptyNode):
+            slicer.mrmlScene.RemoveNode(self.emptyNode)
+
+        self.masterVolumeNode = None
+        self.masterLabelMapNode = None
+        self.masterMaskedVolumeNode = None
+        self.emptyNode = None
+
+        if self.logger and self.vtkLogFilter:
+            self.logger.removeFilter(self.vtkLogFilter)
+            self.vtkLogFilter = None
+            self.logger = None
 
 
 class SlicerWebODMManager:
