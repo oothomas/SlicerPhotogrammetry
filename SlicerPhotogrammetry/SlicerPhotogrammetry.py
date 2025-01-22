@@ -1989,13 +1989,12 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         self.predictor = None
         self.sam = None
         import torch
-        # if torch.cuda.is_available():
-        #     self.device = torch.device("cuda:0")
-        #     print("Using CUDA:0 for SAM.")
-        # else:
-        #     self.device = torch.device("cpu")
-        #     print("Using CPU for SAM.")
-        self.device = torch.device("cpu")
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda:0")
+            print("Using CUDA:0 for SAM.")
+        else:
+            self.device = torch.device("cpu")
+            print("Using CPU for SAM.")
 
     def loadSAMModel(self, variant, filename, url):
         try:
