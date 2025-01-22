@@ -38,7 +38,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Creating _mask.png for webODM,
      - Creating single combined GCP file for all sets,
      - Non-blocking WebODM tasks (using pyodm),
-     - Shortening WebODM output folder names,
      - Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
     """
 
@@ -54,7 +53,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageCache = {}
         self.maxCacheSize = 64
 
-        self.downsampleFactor = 0.15  # e.g. 15%
+        self.downsampleFactor = 0.15  # e.g. 15% for slice display usage
 
         # Master nodes
         self.masterVolumeNode = None
@@ -80,8 +79,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.prevButton = None
         self.nextButton = None
 
-        # CHANGED: We no longer have a separate Done button. We combine finalizing ROI + masking
-        # into a single "Mask Current Image" button:
+        # Single "Mask Current Image" button
         self.maskCurrentImageButton = None
 
         self.maskAllImagesButton = None
@@ -118,7 +116,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton = None
         self.lastWebODMOutputLineIndex = 0
 
-        # CHANGES: default params
+        # default params
         self.baselineParams = {
             "matcher-type": "bruteforce",
             "orthophoto-resolution": 0.3,
@@ -145,14 +143,19 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskedCountLabel = None
         self.layoutId = 1003
 
-        # ### CHANGES: New variables for WebODM installation ###
+        # WebODM installation
         self.webODMCheckStatusButton = None
         self.webODMInstallButton = None
         self.webODMRelaunchButton = None
-        self.webODMLocalFolder = None  # e.g. <ModulePath>/Resources/WebODM
+        self.webODMLocalFolder = None
 
-        # NEW: We'll hold a reference to the manager class once it's created.
+        # Manager class
         self.webODMManager = None
+
+        # NEW: We'll store references to 3 radio buttons for resolution
+        self.radioFull = None
+        self.radioHalf = None
+        self.radioQuarter = None
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -165,7 +168,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.createCustomLayout()
 
         #
-        # -- Create a QTabWidget to hold two tabs --
+        # Create a QTabWidget to hold two tabs
         #
         self.mainTabWidget = qt.QTabWidget()
         self.layout.addWidget(self.mainTabWidget)
@@ -184,7 +187,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.mainTabWidget.addTab(tab2Widget, "WebODM")
 
         #
-        # (A) Main Collapsible: Import Image Sets (goes in Tab 1)
+        # (A) Main Collapsible: Import Image Sets (Tab 1)
         #
         parametersCollapsibleButton = ctk.ctkCollapsibleButton()
         parametersCollapsibleButton.text = "Import Image Sets"
@@ -226,6 +229,22 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageSetComboBox.enabled = False
         parametersFormLayout.addRow("Image Set:", self.imageSetComboBox)
         self.imageSetComboBox.connect('currentIndexChanged(int)', self.onImageSetSelected)
+
+        # NEW: group box for resolution selection
+        resGroupBox = qt.QGroupBox("Segmentation Resolution")
+        resLayout = qt.QVBoxLayout(resGroupBox)
+
+        self.radioFull = qt.QRadioButton("Full resolution (1.0)")
+        self.radioFull.setChecked(True)  # default
+        self.radioHalf = qt.QRadioButton("Half resolution (0.5)")
+        self.radioQuarter = qt.QRadioButton("Quarter resolution (0.25)")
+
+        resLayout.addWidget(self.radioFull)
+        resLayout.addWidget(self.radioHalf)
+        resLayout.addWidget(self.radioQuarter)
+
+        parametersFormLayout.addWidget(resGroupBox)
+        # End new group box
 
         self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
         self.placeBoundingBoxButton.enabled = False
@@ -294,7 +313,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 btn.enabled = False
 
         #
-        # (B) Manage WebODM (Install/Launch) Collapsible (goes in Tab 2)
+        # (B) Manage WebODM (Install/Launch) Collapsible (Tab 2)
         #
         manageWODMCollapsibleButton = ctk.ctkCollapsibleButton()
         manageWODMCollapsibleButton.text = "Manage WebODM (Install/Launch)"
@@ -311,7 +330,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         manageWODMFormLayout.addWidget(self.webODMRelaunchButton)
 
         #
-        # (C) Find-GCP Collapsible (goes in Tab 2)
+        # (C) Find-GCP Collapsible (Tab 2)
         #
         webODMCollapsibleButton = ctk.ctkCollapsibleButton()
         webODMCollapsibleButton.text = "Find-GCP"
@@ -349,7 +368,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.generateGCPButton.setEnabled(True)
 
         #
-        # (D) Launch WebODM Task Collapsible (goes in Tab 2)
+        # (D) Launch WebODM Task Collapsible (Tab 2)
         #
         webodmTaskCollapsible = ctk.ctkCollapsibleButton()
         webodmTaskCollapsible.text = "Launch WebODM Task"
@@ -385,22 +404,33 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton.setEnabled(False)
         webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
 
-
-        # Finally add a stretch for Tab 2 layout:
         tab2Layout.addStretch(1)
 
         self.createMasterNodes()
 
-        # Initialize path for local WebODM folder
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
 
-        # Initialize the WebODM Manager
         self.webODMManager = SlicerWebODMManager(widget=self)
         self.webODMCheckStatusButton.connect('clicked(bool)', self.webODMManager.onCheckWebODMStatusClicked)
         self.webODMInstallButton.connect('clicked(bool)', self.webODMManager.onInstallWebODMClicked)
         self.webODMRelaunchButton.connect('clicked(bool)', self.webODMManager.onRelaunchWebODMClicked)
         self.stopMonitoringButton.connect('clicked(bool)', self.webODMManager.onStopMonitoring)
+
+    # NEW method to interpret which radio button is checked
+    def getUserSelectedResolutionFactor(self):
+        """
+        If "Full" is checked, return 1.0.
+        If "Half" is checked, return 0.5.
+        If "Quarter" is checked, return 0.25.
+        """
+        if self.radioHalf.isChecked():
+            return 0.5
+        elif self.radioQuarter.isChecked():
+            return 0.25
+        else:
+            # default is Full resolution
+            return 1.0
 
     def load_dependencies(self):
         try:
@@ -416,8 +446,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 # Ask user to restart 3D Slicer
                 restart = slicer.util.confirmYesNoDisplay(
                     "Pytorch dependencies have been installed. To apply changes, a restart of 3D Slicer is necessary. "
-                    "Would you like to restart now? Click 'YES' to restart immediately or 'NO' if you wish to save "
-                    "your work first and restart manually later."
+                    "Would you like to restart now?"
                 )
                 if restart:
                     slicer.util.restart()
@@ -799,6 +828,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
     def getDownsampledColor(self, setName, index):
+        """
+        Downsamples the color array for quick display in slice views (not the SAM segmentation approach).
+        """
         downKey = (setName, index, 'down')
         if downKey in self.imageCache:
             return self.imageCache[downKey]
@@ -825,7 +857,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         im = Image.open(path).convert('RGB')
         colorArr = np.array(im)
 
-        # Flip up-down and left-right to match how Slicer uses array data
+        # Flip up-down and left-right
         colorArr = np.flipud(colorArr)
         colorArr = np.fliplr(colorArr)
 
@@ -932,9 +964,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def onMaskCurrentImageClicked(self):
         """
-        This combines bounding-box finalization + masking into one step.
-        If there's a boundingBoxRoiNode in the scene, we finalize it as 'bbox',
-        then run the SAM-based mask.
+        Merge bounding-box finalization + SAM.
+        If there's a boundingBoxRoiNode, finalize => 'bbox'.
+        Then run SAM using user-chosen resolution factor.
         """
         stInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stInfo:
@@ -945,7 +977,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if self.boundingBoxRoiNode:
             self.finalizeBoundingBoxAndRemoveROI()
 
-        # Now proceed with the old 'onMaskClicked' logic
         stInfo = self.imageStates.get(self.currentImageIndex, None)  # refresh
         if not stInfo or stInfo["state"] != "bbox":
             slicer.util.warningDisplay("No bounding box defined or finalized for this image. Cannot mask.")
@@ -954,31 +985,74 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         import numpy as np
         import cv2
 
+        # get user-chosen factor
+        resFactor = self.getUserSelectedResolutionFactor()
+
         bboxDown = stInfo["bboxCoords"]
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, self.currentImageIndex)
         colorArrFull = self.getFullColorArray(self.currentSet, self.currentImageIndex)
 
-        opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
-        marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
+        if abs(resFactor - 1.0) < 1e-5:
+            # Original full-res approach
+            opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
+            marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
-        if len(marker_outputs) == 0:
-            mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
+            if len(marker_outputs) == 0:
+                mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
+            else:
+                import torch
+                all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
+                self.logic.predictor.set_image(colorArrFull)
+                combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
+                for box in all_boxes:
+                    with torch.no_grad():
+                        masks, _, _ = self.logic.predictor.predict(
+                            point_coords=None,
+                            point_labels=None,
+                            box=box,
+                            multimask_output=False
+                        )
+                    combined_mask = np.logical_or(combined_mask, masks[0].astype(bool))
+                mask = combined_mask.astype(np.uint8)
         else:
-            import torch
-            all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
-            self.logic.predictor.set_image(colorArrFull)
-            combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
-            for box in all_boxes:
-                with torch.no_grad():
-                    masks, _, _ = self.logic.predictor.predict(
-                        point_coords=None,
-                        point_labels=None,
-                        box=box,
-                        multimask_output=False
-                    )
-                mask_bool = masks[0].astype(bool)
-                combined_mask = np.logical_or(combined_mask, mask_bool)
-            mask = combined_mask.astype(np.uint8)
+            # downsample entire image => colorDown
+            H, W, _ = colorArrFull.shape
+            newW = int(round(W * resFactor))
+            newH = int(round(H * resFactor))
+
+            colorDown = cv2.resize(colorArrFull, (newW, newH), interpolation=cv2.INTER_AREA)
+
+            xMinF, yMinF, xMaxF, yMaxF = bboxFull
+            xMinDown = int(round(xMinF * resFactor))
+            xMaxDown = int(round(xMaxF * resFactor))
+            yMinDown = int(round(yMinF * resFactor))
+            yMaxDown = int(round(yMaxF * resFactor))
+
+            opencvDown = self.logic.pil_to_opencv(self.logic.array_to_pil(colorDown))
+            marker_outputs = self.detect_aruco_bounding_boxes(opencvDown, aruco_dict=cv2.aruco.DICT_4X4_250)
+
+            if len(marker_outputs) == 0:
+                maskDown = self.logic.run_sam_segmentation(colorDown, [xMinDown, yMinDown, xMaxDown, yMaxDown])
+            else:
+                import torch
+                all_boxes = self.assemble_bboxes(np.array([xMinDown, yMinDown, xMaxDown, yMaxDown], dtype=np.int32),
+                                                 marker_outputs,
+                                                 pad=25)
+                self.logic.predictor.set_image(colorDown)
+                combined_mask = np.zeros((newH, newW), dtype=bool)
+                for box in all_boxes:
+                    with torch.no_grad():
+                        masks, _, _ = self.logic.predictor.predict(
+                            point_coords=None,
+                            point_labels=None,
+                            box=box,
+                            multimask_output=False
+                        )
+                    combined_mask = np.logical_or(combined_mask, masks[0].astype(bool))
+                maskDown = combined_mask.astype(np.uint8)
+
+            # upsample
+            mask = cv2.resize(maskDown, (W, H), interpolation=cv2.INTER_NEAREST)
 
         stInfo["state"] = "masked"
         maskBool = (mask > 0)
@@ -1033,10 +1107,19 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.maskAllProgressBar.setVisible(False)
             return
 
+        import time
+        start_time = time.time()
+
+        # resolution factor for "Mask All" as well
+        resFactor = self.getUserSelectedResolutionFactor()
+
+        import time
+
+        # Start the timer
         start_time = time.time()
 
         for count, i in enumerate(toMask):
-            self.maskSingleImage(i, bboxDown)
+            self.maskSingleImage(i, bboxDown, resFactor)
             processed = count + 1
             self.maskAllProgressBar.setValue(processed)
             elapsed_secs = time.time() - start_time
@@ -1059,13 +1142,24 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.maskAllProgressBar.setFormat(msg)
             slicer.app.processEvents()
 
+        # End the timer
+        end_time = time.time()
+
+        # Calculate the elapsed time
+        elapsed_time = end_time - start_time
+        print(f"Set Masking execution time: {elapsed_time:.6f} seconds")
+
         slicer.util.infoDisplay("All images in set masked and saved.")
         self.maskAllProgressBar.setVisible(False)
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    def maskSingleImage(self, index, bboxDown):
+    def maskSingleImage(self, index, bboxDown, resFactor=1.0):
+        """
+        If 1.0 => old full resolution approach.
+        Otherwise => downsample entire image + bounding box => run SAM => upsample => save
+        """
         import numpy as np
         import cv2
         import torch
@@ -1073,26 +1167,65 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, index)
         colorArrFull = self.getFullColorArray(self.currentSet, index)
 
-        opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
-        marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
+        if abs(resFactor - 1.0) < 1e-5:
+            # original full res path
+            opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
+            marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
-        if len(marker_outputs) == 0:
-            mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
+            if len(marker_outputs) == 0:
+                mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
+            else:
+                all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
+                self.logic.predictor.set_image(colorArrFull)
+                combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
+                for box in all_boxes:
+                    with torch.no_grad():
+                        masks, _, _ = self.logic.predictor.predict(
+                            point_coords=None,
+                            point_labels=None,
+                            box=box,
+                            multimask_output=False
+                        )
+                    mask_bool = masks[0].astype(bool)
+                    combined_mask = np.logical_or(combined_mask, mask_bool)
+                mask = combined_mask.astype(np.uint8)
         else:
-            all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
-            self.logic.predictor.set_image(colorArrFull)
-            combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
-            for box in all_boxes:
-                with torch.no_grad():
-                    masks, _, _ = self.logic.predictor.predict(
-                        point_coords=None,
-                        point_labels=None,
-                        box=box,
-                        multimask_output=False
-                    )
-                mask_bool = masks[0].astype(bool)
-                combined_mask = np.logical_or(combined_mask, mask_bool)
-            mask = combined_mask.astype(np.uint8)
+            H, W, _ = colorArrFull.shape
+            newW = int(round(W * resFactor))
+            newH = int(round(H * resFactor))
+
+            colorDown = cv2.resize(colorArrFull, (newW, newH), interpolation=cv2.INTER_AREA)
+
+            xMinF, yMinF, xMaxF, yMaxF = bboxFull
+            xMinDown = int(round(xMinF * resFactor))
+            xMaxDown = int(round(xMaxF * resFactor))
+            yMinDown = int(round(yMinF * resFactor))
+            yMaxDown = int(round(yMaxF * resFactor))
+
+            opencvDown = self.logic.pil_to_opencv(self.logic.array_to_pil(colorDown))
+            marker_outputs = self.detect_aruco_bounding_boxes(opencvDown, aruco_dict=cv2.aruco.DICT_4X4_250)
+
+            if len(marker_outputs) == 0:
+                maskDown = self.logic.run_sam_segmentation(colorDown, [xMinDown, yMinDown, xMaxDown, yMaxDown])
+            else:
+                all_boxes = self.assemble_bboxes(np.array([xMinDown, yMinDown, xMaxDown, yMaxDown], dtype=np.int32),
+                                                 marker_outputs,
+                                                 pad=25)
+                self.logic.predictor.set_image(colorDown)
+                combined_mask = np.zeros((newH, newW), dtype=bool)
+                for box in all_boxes:
+                    with torch.no_grad():
+                        masks, _, _ = self.logic.predictor.predict(
+                            point_coords=None,
+                            point_labels=None,
+                            box=box,
+                            multimask_output=False
+                        )
+                    combined_mask = np.logical_or(combined_mask, masks[0].astype(bool))
+                maskDown = combined_mask.astype(np.uint8)
+
+            # upsample
+            mask = cv2.resize(maskDown, (W, H), interpolation=cv2.INTER_NEAREST)
 
         self.imageStates[index]["state"] = "masked"
         self.imageStates[index]["bboxCoords"] = bboxDown
@@ -1144,7 +1277,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if not coordsDown:
             return
         ijkToRasMat = vtk.vtkMatrix4x4()
-        self.masterVolumeNode.GetIJKToRASMatrix(ijkToRasMat)
+        self.masterVolumeNode.GetRASToIJKMatrix(ijkToRasMat)
 
         def ijkToRas(i, j):
             p = [i, j, 0, 1]
@@ -1704,9 +1837,6 @@ class SlicerWebODMManager:
             slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
 
     def onRunWebODMTask(self):
-        """
-        Creates and runs the pyodm Task, then starts a QTimer to monitor it.
-        """
         from pyodm import Node
 
         node_ip = self.widget.nodeIPLineEdit.text.strip()
@@ -1859,12 +1989,13 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         self.predictor = None
         self.sam = None
         import torch
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda:0")
-            print("Using CUDA:0 for SAM.")
-        else:
-            self.device = torch.device("cpu")
-            print("Using CPU for SAM.")
+        # if torch.cuda.is_available():
+        #     self.device = torch.device("cuda:0")
+        #     print("Using CUDA:0 for SAM.")
+        # else:
+        #     self.device = torch.device("cpu")
+        #     print("Using CPU for SAM.")
+        self.device = torch.device("cpu")
 
     def loadSAMModel(self, variant, filename, url):
         try:
@@ -1907,6 +2038,10 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         return sorted(image_paths)
 
     def run_sam_segmentation(self, image_rgb, bounding_box):
+        """
+        Given a color array (H,W,3) and bounding box in full coords,
+        run the SAM predictor to produce a mask.
+        """
         if not self.predictor:
             raise RuntimeError("SAM model is not loaded.")
         import torch
