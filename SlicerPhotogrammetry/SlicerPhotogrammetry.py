@@ -80,8 +80,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.prevButton = None
         self.nextButton = None
 
-        # CHANGED: We no longer have a separate Done button. We will combine finalizing ROI + masking
-        # into a single ?Mask Current Image? button:
+        # CHANGED: We no longer have a separate Done button. We combine finalizing ROI + masking
+        # into a single "Mask Current Image" button:
         self.maskCurrentImageButton = None
 
         self.maskAllImagesButton = None
@@ -165,11 +165,31 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.createCustomLayout()
 
         #
-        # (A) Main Collapsible: Import Image Sets
+        # -- Create a QTabWidget to hold two tabs --
+        #
+        self.mainTabWidget = qt.QTabWidget()
+        self.layout.addWidget(self.mainTabWidget)
+
+        # Tab 1: "Image Masking"
+        tab1Widget = qt.QWidget()
+        tab1Layout = qt.QVBoxLayout(tab1Widget)
+        tab1Widget.setLayout(tab1Layout)
+
+        # Tab 2: "WebODM"
+        tab2Widget = qt.QWidget()
+        tab2Layout = qt.QVBoxLayout(tab2Widget)
+        tab2Widget.setLayout(tab2Layout)
+
+        self.mainTabWidget.addTab(tab1Widget, "Image Masking")
+        self.mainTabWidget.addTab(tab2Widget, "WebODM")
+
+        #
+        # (A) Main Collapsible: Import Image Sets (goes in Tab 1)
         #
         parametersCollapsibleButton = ctk.ctkCollapsibleButton()
         parametersCollapsibleButton.text = "Import Image Sets"
-        self.layout.addWidget(parametersCollapsibleButton)
+        tab1Layout.addWidget(parametersCollapsibleButton)
+
         parametersFormLayout = qt.QFormLayout(parametersCollapsibleButton)
 
         self.samVariantCombo = qt.QComboBox()
@@ -212,35 +232,22 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addWidget(self.placeBoundingBoxButton)
         self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
 
-        # CHANGED: Remove old Done button references. We combine bounding-box finalization + masking
-        # in one step. So no separate ?Done? button in the UI now.
-
-        # NEW: Renamed the old separate "Mask Current Image" button to a single combined step:
         self.maskCurrentImageButton = qt.QPushButton("Mask Current Image")
         self.maskCurrentImageButton.enabled = False
         parametersFormLayout.addWidget(self.maskCurrentImageButton)
-        # This new method merges the old ?onDoneClicked? + ?onMaskClicked? logic
         self.maskCurrentImageButton.connect('clicked(bool)', self.onMaskCurrentImageClicked)
 
         navLayout = qt.QGridLayout()
-
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         prevIconPath = os.path.join(modulePath, 'Resources/Icons', 'Previous.png')
         nextIconPath = os.path.join(modulePath, 'Resources/Icons', 'Next.png')
 
-        # Previous Button with Icon
         self.prevButton = qt.QPushButton("<")
-        #prevIcon = qt.QIcon(qt.QPixmap(prevIconPath))
-        #self.prevButton.setIcon(prevIcon)
         self.prevButton.setToolTip("Go to the previous image")
 
-        # Previous Button with Icon
         self.nextButton = qt.QPushButton(">")
-        #nextIcon = qt.QIcon(qt.QPixmap(nextIconPath))
-        #self.nextButton.setIcon(nextIcon)
         self.nextButton.setToolTip("Go to the next image")
 
-        # Image Index Label
         self.imageIndexLabel = qt.QLabel("Image 0")
         self.imageIndexLabel.setAlignment(qt.Qt.AlignCenter)
 
@@ -250,8 +257,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         navLayout.addWidget(self.prevButton, 0, 0)
         navLayout.addWidget(self.imageIndexLabel, 0, 1)
         navLayout.addWidget(self.nextButton, 0, 2)
-
         parametersFormLayout.addRow("    ", navLayout)
+
         self.prevButton.connect('clicked(bool)', self.onPrevImage)
         self.nextButton.connect('clicked(bool)', self.onNextImage)
 
@@ -287,11 +294,28 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 btn.enabled = False
 
         #
-        # (B) Find-GCP
+        # (B) Manage WebODM (Install/Launch) Collapsible (goes in Tab 2)
+        #
+        manageWODMCollapsibleButton = ctk.ctkCollapsibleButton()
+        manageWODMCollapsibleButton.text = "Manage WebODM (Install/Launch)"
+        tab2Layout.addWidget(manageWODMCollapsibleButton)
+        manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsibleButton)
+
+        self.webODMCheckStatusButton = qt.QPushButton("Check WebODM Status on port 3002")
+        manageWODMFormLayout.addWidget(self.webODMCheckStatusButton)
+
+        self.webODMInstallButton = qt.QPushButton("Install/Reinstall WebODM (GPU)")
+        manageWODMFormLayout.addWidget(self.webODMInstallButton)
+
+        self.webODMRelaunchButton = qt.QPushButton("Relaunch WebODM on Port 3002")
+        manageWODMFormLayout.addWidget(self.webODMRelaunchButton)
+
+        #
+        # (C) Find-GCP Collapsible (goes in Tab 2)
         #
         webODMCollapsibleButton = ctk.ctkCollapsibleButton()
         webODMCollapsibleButton.text = "Find-GCP"
-        self.layout.addWidget(webODMCollapsibleButton)
+        tab2Layout.addWidget(webODMCollapsibleButton)
         webODMFormLayout = qt.QFormLayout(webODMCollapsibleButton)
 
         self.cloneFindGCPButton = qt.QPushButton("Clone Find-GCP")
@@ -325,11 +349,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.generateGCPButton.setEnabled(True)
 
         #
-        # (C) Launch WebODM Task
+        # (D) Launch WebODM Task Collapsible (goes in Tab 2)
         #
         webodmTaskCollapsible = ctk.ctkCollapsibleButton()
         webodmTaskCollapsible.text = "Launch WebODM Task"
-        self.layout.addWidget(webodmTaskCollapsible)
+        tab2Layout.addWidget(webodmTaskCollapsible)
         webodmTaskFormLayout = qt.QFormLayout(webodmTaskCollapsible)
 
         self.nodeIPLineEdit = qt.QLineEdit("127.0.0.1")
@@ -361,33 +385,17 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton.setEnabled(False)
         webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
 
-        ###
-        # (D) NEW SECTION: Manage WebODM (Install/Launch)
-        ###
-        manageWODMCollapsibleButton = ctk.ctkCollapsibleButton()
-        manageWODMCollapsibleButton.text = "Manage WebODM (Install/Launch)"
-        self.layout.addWidget(manageWODMCollapsibleButton)
-        manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsibleButton)
 
-        self.webODMCheckStatusButton = qt.QPushButton("Check WebODM Status on port 3002")
-        manageWODMFormLayout.addWidget(self.webODMCheckStatusButton)
+        # Finally add a stretch for Tab 2 layout:
+        tab2Layout.addStretch(1)
 
-        self.webODMInstallButton = qt.QPushButton("Install/Reinstall WebODM (GPU)")
-        manageWODMFormLayout.addWidget(self.webODMInstallButton)
-
-        self.webODMRelaunchButton = qt.QPushButton("Relaunch WebODM on Port 3002")
-        manageWODMFormLayout.addWidget(self.webODMRelaunchButton)
-
-        self.layout.addStretch(1)
         self.createMasterNodes()
 
         # Initialize path for local WebODM folder
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
 
-        # ----
-        # (E) Initialize the WebODM Manager, hooking up all the WebODM-related signals:
-        # ----
+        # Initialize the WebODM Manager
         self.webODMManager = SlicerWebODMManager(widget=self)
         self.webODMCheckStatusButton.connect('clicked(bool)', self.webODMManager.onCheckWebODMStatusClicked)
         self.webODMInstallButton.connect('clicked(bool)', self.webODMManager.onInstallWebODMClicked)
@@ -395,34 +403,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton.connect('clicked(bool)', self.webODMManager.onStopMonitoring)
 
     def load_dependencies(self):
-        # ALWAYS ADD EXTERNAL IMPORTS HERE
-        ##############################################################
-        # EXIF helper: read/write using Pillow
-        ##############################################################
         try:
             import PyTorchUtils
         except ModuleNotFoundError:
-            slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. Please install it from the "
-                                   "Extensions Manager.")
+            slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. "
+                                   "Please install it from the Extensions Manager.")
         torchLogic = PyTorchUtils.PyTorchUtilsLogic()
         if not torchLogic.torchInstalled():
-            logging.debug(
-                'SlicerPhotogrammetry requires the PyTorch Python package. Installing... (it may take several '
-                'minutes)')
+            logging.debug('SlicerPhotogrammetry requires the PyTorch Python package. Installing...')
             torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
-
             if torch:
                 # Ask user to restart 3D Slicer
                 restart = slicer.util.confirmYesNoDisplay(
-                    "Pytorch dependencies has been installed. To apply changes, a restart of 3D Slicer is necessary. "
-                    "Would you like to restart now? Click 'YES' to restart immediately or 'NO' if you wish to save your "
-                    "work first and restart manually later.")
-
+                    "Pytorch dependencies have been installed. To apply changes, a restart of 3D Slicer is necessary. "
+                    "Would you like to restart now? Click 'YES' to restart immediately or 'NO' if you wish to save "
+                    "your work first and restart manually later."
+                )
                 if restart:
                     slicer.util.restart()
-
             if torch is None:
-                slicer.util.messageBox('PyTorch extension needs to be installed manually to use this module.')
+                slicer.util.messageBox('PyTorch extension must be installed manually to use this module.')
 
         try:
             from PIL import Image
@@ -434,7 +434,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         try:
             import cv2
-            # Check if contrib modules are available
             if not hasattr(cv2, 'xfeatures2d'):
                 raise ImportError("opencv-contrib-python is not properly installed")
         except ImportError:
@@ -546,7 +545,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         red2Comp = lm.sliceWidget('Red2').sliceLogic().GetSliceCompositeNode()
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
-        #red2Comp.SetLabelVolumeID(self.emptyNode.GetID())
 
     def onFindGCPScriptChanged(self, newPath):
         slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
@@ -779,9 +777,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         st = self.imageStates[self.currentImageIndex]["state"]
         self.removeBboxLines()
 
-        # Retrieve the downsampled color only
         colorArrDown = self.getDownsampledColor(self.currentSet, self.currentImageIndex)
-
         colorArrDownRGBA = colorArrDown[np.newaxis, ...]
         slicer.util.updateVolumeFromArray(self.masterVolumeNode, colorArrDownRGBA)
 
@@ -803,9 +799,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
     def getDownsampledColor(self, setName, index):
-        """
-        Downsample only the color array (no grayscale).
-        """
         downKey = (setName, index, 'down')
         if downKey in self.imageCache:
             return self.imageCache[downKey]
@@ -937,34 +930,27 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.currentImageIndex += 1
             self.updateVolumeDisplay()
 
-    # --------------------------------------------------------------------------------
-    # CHANGED: Instead of "onDoneClicked" + "onMaskClicked," we create one combined
-    #          method "onMaskCurrentImageClicked".
-    # --------------------------------------------------------------------------------
     def onMaskCurrentImageClicked(self):
         """
-        This combines the bounding-box-finalization code and the masking code into a single step.
-        If the user has placed an ROI but hasn't finalized it yet, we finalize it (like old onDoneClicked)
-        and then proceed to mask (like old onMaskClicked).
+        This combines bounding-box finalization + masking into one step.
+        If there's a boundingBoxRoiNode in the scene, we finalize it as 'bbox',
+        then run the SAM-based mask.
         """
         stInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stInfo:
             slicer.util.warningDisplay("No image state found. Please select a valid image.")
             return
 
-        currentState = stInfo["state"]
-        # If we do have an ROI node still in the scene, let's finalize bounding box:
+        # If ROI not yet finalized, do so
         if self.boundingBoxRoiNode:
             self.finalizeBoundingBoxAndRemoveROI()
-            # after finalize, we set it to "bbox", so we can proceed
 
-        # Now do the old "onMaskClicked" logic:
-        stInfo = self.imageStates.get(self.currentImageIndex, None)  # refresh local reference
+        # Now proceed with the old 'onMaskClicked' logic
+        stInfo = self.imageStates.get(self.currentImageIndex, None)  # refresh
         if not stInfo or stInfo["state"] != "bbox":
             slicer.util.warningDisplay("No bounding box defined or finalized for this image. Cannot mask.")
             return
 
-        # Actually perform the SAM masking:
         import numpy as np
         import cv2
 
@@ -1002,11 +988,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateWebODMTaskAvailability()
 
         self.restoreButtonStates()
-
         self.enableMaskAllImagesIfPossible()
 
     def finalizeBoundingBoxAndRemoveROI(self):
-        """ Helper function that duplicates the old 'onDoneClicked' bounding box finalization. """
+        """Used to finalize bounding box placement before masking."""
         if not self.boundingBoxRoiNode:
             return
 
@@ -1016,7 +1001,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         stInfo["bboxCoords"] = coordsDown
         stInfo["maskNodes"] = None
 
-        # Turn off handles
         dnode = self.boundingBoxRoiNode.GetDisplayNode()
         dnode.SetHandlesInteractive(False)
 
@@ -1024,15 +1008,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         interactionNode.SetPlaceModePersistence(0)
         interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
 
-        # If ROI display node still around, remove it
         if self.boundingBoxRoiNode.GetDisplayNode():
             slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
         slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
         self.boundingBoxRoiNode = None
-
-    # --------------------------------------------------------------------------------
-    # End of merged function
-    # --------------------------------------------------------------------------------
 
     def onMaskAllImagesClicked(self):
         stInfo = self.imageStates.get(self.currentImageIndex, None)
@@ -1043,8 +1022,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         bboxDown = stInfo["bboxCoords"]
         self.maskAllProgressBar.setVisible(True)
         self.maskAllProgressBar.setTextVisible(True)
-        toMask = [i for i in range(len(self.imagePaths)) if
-                  i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
+        toMask = [i for i in range(len(self.imagePaths))
+                  if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"]
         n = len(toMask)
         self.maskAllProgressBar.setRange(0, n)
         self.maskAllProgressBar.setValue(0)
@@ -1238,10 +1217,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 b.enabled = val
 
     def disableAllButtonsExceptMask(self):
-        """
-        Disables all UI elements except the new MaskCurrentImage button,
-        which we keep enabled to let user finalize bounding box once done.
-        """
         for b in self.buttonsToManage:
             if b != self.maskCurrentImageButton:
                 if isinstance(b, qt.QComboBox):
@@ -1276,7 +1251,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             autoCloseMsec=6000
         )
 
-        # Our single combined button will finalize + mask once user is satisfied
         self.maskCurrentImageButton.enabled = True
 
     def checkROIPlacementComplete(self, caller, event):
@@ -1461,7 +1435,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay("Please select a valid master folder.")
             return
 
-        subfolders = [f for f in os.listdir(masterFolderPath) if os.path.isdir(os.path.join(masterFolderPath, f))]
+        subfolders = [f for f in os.listdir(masterFolderPath)
+                      if os.path.isdir(os.path.join(masterFolderPath, f))]
         allImages = []
         for sf in subfolders:
             subFolderPath = os.path.join(masterFolderPath, sf)
@@ -1513,20 +1488,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         return shortName
 
     def onRunWebODMTask(self):
-        """
-        We keep the same signature, but the actual WebODM logic is delegated
-        to our SlicerWebODMManager. This preserves the UI flow.
-        """
-        # First replicate the existing check:
         if not self.allSetsHavePhysicalMasks():
             slicer.util.warningDisplay("Not all images have masks. Please mask all sets first.")
             return
-
-        # Now hand off to the manager for the actual logic
         self.webODMManager.onRunWebODMTask()
 
     def onCloneFindGCPClicked(self):
-        import os, shutil
+        import os
+        import shutil
         import slicer
 
         try:
@@ -1624,26 +1593,13 @@ class SlicerWebODMManager:
     """
 
     def __init__(self, widget):
-        """
-        We store references to the main widget so we can access UI elements,
-        directory paths, and shared logic. The widget's 'onRunWebODMTask'
-        method calls self.onRunWebODMTask() below, etc.
-        """
-        self.widget = widget  # SlicerPhotogrammetryWidget instance
-
-        # We'll store our pyodm references here
+        self.widget = widget
         self.webodmTask = None
         self.webodmOutDir = None
         self.webodmTimer = None
-
-        # Keep track of the last line index for output
         self.lastWebODMOutputLineIndex = 0
 
     def onCheckWebODMStatusClicked(self):
-        """
-        Check if Docker is installed, see if anything is on port 3002,
-        and if so, auto-populate IP/port in the UI.
-        """
         try:
             subprocess.run(["docker", "--version"], check=True, capture_output=True)
         except Exception as e:
@@ -1667,10 +1623,6 @@ class SlicerWebODMManager:
             slicer.util.infoDisplay("No WebODM node found on port 3002. You can install/launch below.")
 
     def onInstallWebODMClicked(self):
-        """
-        Install or re-install WebODM (GPU-based) in widget.webODMLocalFolder.
-        For demonstration, we only do docker pull of 'opendronemap/nodeodm:gpu'.
-        """
         localFolder = self.widget.webODMLocalFolder
         if os.path.isdir(localFolder):
             msg = (
@@ -1713,9 +1665,6 @@ class SlicerWebODMManager:
             slicer.util.errorDisplay(f"Docker pull failed: {str(e)}")
 
     def onRelaunchWebODMClicked(self):
-        """
-        Stop any container on port 3002, then launch WebODM with GPU support on 3002.
-        """
         try:
             result = subprocess.run(
                 ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
