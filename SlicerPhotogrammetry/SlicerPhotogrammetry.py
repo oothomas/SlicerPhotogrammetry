@@ -209,7 +209,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         savedMasterFolder = slicer.app.settings().value("SlicerPhotogrammetry/masterFolderPath", "")
         if os.path.isdir(savedMasterFolder):
             self.masterFolderSelector.directory = savedMasterFolder
-        parametersFormLayout.addRow("Master Folder:", self.masterFolderSelector)
+        parametersFormLayout.addRow("Input Folder:", self.masterFolderSelector)
 
         self.outputFolderSelector = ctk.ctkDirectoryButton()
         savedOutputFolder = slicer.app.settings().value("SlicerPhotogrammetry/outputFolderPath", "")
