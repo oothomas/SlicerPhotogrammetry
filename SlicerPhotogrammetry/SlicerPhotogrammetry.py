@@ -39,6 +39,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Creating single combined GCP file for all sets,
      - Non-blocking WebODM tasks (using pyodm),
      - Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
+     - Inclusion/Exclusion point marking for SAM.
     """
 
     def __init__(self, parent=None):
@@ -49,7 +50,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.vtkLogFilter = None
         self.logger = None
 
-        # CHANGED: small in-memory cache
+        # small in-memory cache
         self.imageCache = {}
         self.maxCacheSize = 64
 
@@ -73,7 +74,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.createdNodes = []
         self.currentBboxLineNodes = []
         self.boundingBoxRoiNode = None
-        self.placingBoundingBox = False
 
         self.buttonsToManage = []
         self.prevButton = None
@@ -156,11 +156,22 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.radioHalf = None
         self.radioQuarter = None
 
-        # For Negative (Exclusion) points
-        self.addExclusionPointButton = None
-        self.clearExclusionPointsButton = None
-        self.exclusionPointNode = None  # MarkupsFiducialNode for negative points
-        self.exclusionPointObserverTag = None  # store the observer tag for the negative point
+        #
+        # NEW: Inclusion/Exclusion points
+        #
+        # We have one Markups node for EXCLUSION, one for INCLUSION.
+        # Exclusion points appear in red, inclusion points in green.
+        #
+        self.exclusionPointNode = None
+        self.exclusionPointAddedObserverTag = None
+
+        self.inclusionPointNode = None
+        self.inclusionPointAddedObserverTag = None
+
+        self.addInclusionPointsButton = None
+        self.addExclusionPointsButton = None
+        self.stopAddingPointsButton = None
+        self.clearPointsButton = None
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -260,7 +271,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskCurrentImageButton.connect('clicked(bool)', self.onMaskCurrentImageClicked)
 
         navLayout = qt.QGridLayout()
-        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
 
         self.prevButton = qt.QPushButton("<")
         self.prevButton.setToolTip("Go to the previous image")
@@ -312,6 +322,43 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 btn.setEnabled(False)
             else:
                 btn.enabled = False
+
+        #
+        # NEW: Inclusion/Exclusion points UI
+        #
+        # We create four buttons in a single row:
+        # (1) Add Inclusion Points (green)
+        # (2) Add Exclusion Points (red)
+        # (3) Stop Adding
+        # (4) Clear Points
+        #
+        pointsButtonsLayout = qt.QHBoxLayout()
+
+        # (1) Add Inclusion
+        self.addInclusionPointsButton = qt.QPushButton("Add Inclusion Points")
+        self.addInclusionPointsButton.enabled = False
+        self.addInclusionPointsButton.connect('clicked(bool)', self.onAddInclusionPointsClicked)
+        pointsButtonsLayout.addWidget(self.addInclusionPointsButton)
+
+        # (2) Add Exclusion
+        self.addExclusionPointsButton = qt.QPushButton("Add Exclusion Points")
+        self.addExclusionPointsButton.enabled = False
+        self.addExclusionPointsButton.connect('clicked(bool)', self.onAddExclusionPointsClicked)
+        pointsButtonsLayout.addWidget(self.addExclusionPointsButton)
+
+        # (3) Stop Adding
+        self.stopAddingPointsButton = qt.QPushButton("Stop Adding")
+        self.stopAddingPointsButton.enabled = False
+        self.stopAddingPointsButton.connect('clicked(bool)', self.onStopAddingPointsClicked)
+        pointsButtonsLayout.addWidget(self.stopAddingPointsButton)
+
+        # (4) Clear
+        self.clearPointsButton = qt.QPushButton("Clear Points")
+        self.clearPointsButton.enabled = False
+        self.clearPointsButton.connect('clicked(bool)', self.onClearPointsClicked)
+        pointsButtonsLayout.addWidget(self.clearPointsButton)
+
+        parametersFormLayout.addRow("Points:", pointsButtonsLayout)
 
         #
         # (B) Manage WebODM (Install/Launch) Collapsible
@@ -418,23 +465,203 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.webODMRelaunchButton.connect('clicked(bool)', self.webODMManager.onRelaunchWebODMClicked)
         self.stopMonitoringButton.connect('clicked(bool)', self.webODMManager.onStopMonitoring)
 
-        #
-        # Add the two new buttons for negative-point placement and clearing
-        #
-        exclusionButtonsLayout = qt.QHBoxLayout()
-        self.addExclusionPointButton = qt.QPushButton("Add Exclusion Point")
-        self.addExclusionPointButton.enabled = False
-        self.addExclusionPointButton.connect('clicked(bool)', self.onAddExclusionPointClicked)
+        # Initialize Markups nodes for Inclusions and Exclusions
+        self.initializeInclusionMarkupsNode()
+        self.initializeExclusionMarkupsNode()
 
-        self.clearExclusionPointsButton = qt.QPushButton("Clear Exclusion Points")
-        self.clearExclusionPointsButton.enabled = False
-        self.clearExclusionPointsButton.connect('clicked(bool)', self.onClearExclusionPointsClicked)
+    #
+    # ---------------------------
+    # CHANGES BELOW: Markups Nodes for Inclusion and Exclusion
+    # ---------------------------
+    #
+    def initializeExclusionMarkupsNode(self):
+        """Create (or retrieve) a single MarkupsFiducialNode used for all exclusion points (red)."""
+        existingNode = slicer.mrmlScene.GetFirstNodeByName("ExclusionPoints")
+        if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
+            self.exclusionPointNode = existingNode
+        else:
+            self.exclusionPointNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode", "ExclusionPoints"
+            )
+            self.exclusionPointNode.CreateDefaultDisplayNodes()
 
-        exclusionButtonsLayout.addWidget(self.addExclusionPointButton)
-        exclusionButtonsLayout.addWidget(self.clearExclusionPointsButton)
-        parametersFormLayout.addRow("Exclusion:", exclusionButtonsLayout)
+        # Make them red
+        if self.exclusionPointNode.GetDisplayNode():
+            self.exclusionPointNode.GetDisplayNode().SetSelectedColor(1, 0, 0)  # red
+            self.exclusionPointNode.GetDisplayNode().SetColor(1, 0, 0)
 
-    # Interpret which radio button is checked
+        self.exclusionPointNode.SetMaximumNumberOfControlPoints(-1)
+
+        if not self.exclusionPointAddedObserverTag:
+            self.exclusionPointAddedObserverTag = self.exclusionPointNode.AddObserver(
+                slicer.vtkMRMLMarkupsNode.PointAddedEvent, self.onExclusionPointAdded
+            )
+
+    def initializeInclusionMarkupsNode(self):
+        """Create (or retrieve) a single MarkupsFiducialNode used for all inclusion points (green)."""
+        existingNode = slicer.mrmlScene.GetFirstNodeByName("InclusionPoints")
+        if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
+            self.inclusionPointNode = existingNode
+        else:
+            self.inclusionPointNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode", "InclusionPoints"
+            )
+            self.inclusionPointNode.CreateDefaultDisplayNodes()
+
+        # Make them green
+        if self.inclusionPointNode.GetDisplayNode():
+            self.inclusionPointNode.GetDisplayNode().SetSelectedColor(0, 1, 0)  # green
+            self.inclusionPointNode.GetDisplayNode().SetColor(0, 1, 0)
+
+        self.inclusionPointNode.SetMaximumNumberOfControlPoints(-1)
+
+        if not self.inclusionPointAddedObserverTag:
+            self.inclusionPointAddedObserverTag = self.inclusionPointNode.AddObserver(
+                slicer.vtkMRMLMarkupsNode.PointAddedEvent, self.onInclusionPointAdded
+            )
+
+    def onExclusionPointAdded(self, caller, event):
+        """
+        Debug callback each time a new exclusion point is placed.
+        """
+        numPoints = caller.GetNumberOfControlPoints()
+        logging.info(f"[ExclusionPoints Debug] A new point was added. Current total = {numPoints}.")
+
+    def onInclusionPointAdded(self, caller, event):
+        """
+        Debug callback each time a new inclusion point is placed.
+        """
+        numPoints = caller.GetNumberOfControlPoints()
+        logging.info(f"[InclusionPoints Debug] A new point was added. Current total = {numPoints}.")
+    #
+    # End Markups changes
+    # ---------------------------
+    #
+
+    def onAddInclusionPointsClicked(self):
+        """Enter place mode for the inclusion Markups node. We disable the Exclusion button while active."""
+        logging.info("[InclusionPoints Debug] Entering multi-point place mode (inclusion).")
+
+        # Stop if already in place mode for something else
+        self.stopAnyActivePlacement()
+
+        # Set up place mode for inclusion node
+        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
+        selectionNode.SetActivePlaceNodeID(self.inclusionPointNode.GetID())
+
+        interactionNode.SetPlaceModePersistence(1)
+        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
+        # Now manage button states
+        self.addExclusionPointsButton.enabled = False
+        self.stopAddingPointsButton.enabled = True
+        self.addInclusionPointsButton.enabled = False
+
+    def onAddExclusionPointsClicked(self):
+        """Enter place mode for the exclusion Markups node. We disable the Inclusion button while active."""
+        logging.info("[ExclusionPoints Debug] Entering multi-point place mode (exclusion).")
+
+        # Stop if already in place mode for something else
+        self.stopAnyActivePlacement()
+
+        # Set up place mode for exclusion node
+        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
+        selectionNode.SetActivePlaceNodeID(self.exclusionPointNode.GetID())
+
+        interactionNode.SetPlaceModePersistence(1)
+        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
+        # Now manage button states
+        self.addInclusionPointsButton.enabled = False
+        self.stopAddingPointsButton.enabled = True
+        self.addExclusionPointsButton.enabled = False
+
+    def onStopAddingPointsClicked(self):
+        """Stop place mode, restoring normal usage. Both 'Add Inclusion' and 'Add Exclusion' become enabled."""
+        logging.info("[Points Debug] Stopping any place mode for inclusion/exclusion points.")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetPlaceModePersistence(0)
+        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+
+        # Re-enable both "Add Inclusion" and "Add Exclusion"
+        self.addInclusionPointsButton.enabled = True
+        self.addExclusionPointsButton.enabled = True
+        self.stopAddingPointsButton.enabled = False
+
+    def onClearPointsClicked(self):
+        """
+        Prompt the user: Clear Exclusion? Clear Inclusion? or Clear Both? or Cancel.
+        Then do the appropriate clearing.
+        """
+        if not self.exclusionPointNode and not self.inclusionPointNode:
+            return
+
+        msgBox = qt.QMessageBox()
+        msgBox.setWindowTitle("Clear Points")
+        msgBox.setText("Choose which points you wish to clear:")
+        clearExclButton = msgBox.addButton("Exclusion Only", qt.QMessageBox.ActionRole)
+        clearInclButton = msgBox.addButton("Inclusion Only", qt.QMessageBox.ActionRole)
+        clearBothButton = msgBox.addButton("Both", qt.QMessageBox.ActionRole)
+        cancelButton = msgBox.addButton("Cancel", qt.QMessageBox.RejectRole)
+
+        msgBox.exec_()
+
+        clickedButton = msgBox.clickedButton()
+        if clickedButton == cancelButton:
+            logging.info("Clear points canceled by user.")
+            return
+        elif clickedButton == clearExclButton:
+            self.exclusionPointNode.RemoveAllControlPoints()
+            logging.info("Cleared all Exclusion points.")
+        elif clickedButton == clearInclButton:
+            self.inclusionPointNode.RemoveAllControlPoints()
+            logging.info("Cleared all Inclusion points.")
+        elif clickedButton == clearBothButton:
+            self.exclusionPointNode.RemoveAllControlPoints()
+            self.inclusionPointNode.RemoveAllControlPoints()
+            logging.info("Cleared all Exclusion and Inclusion points.")
+
+    def stopAnyActivePlacement(self):
+        """
+        If either inclusion or exclusion is in place mode, stop it.
+        """
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        # If we are currently in place mode, disable it
+        if interactionNode.GetCurrentInteractionMode() == interactionNode.Place:
+            interactionNode.SetPlaceModePersistence(0)
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+
+    def updatePointButtons(self):
+        """
+        Called whenever we want to refresh the state of the Inclusion/Exclusion buttons
+        based on whether the current image is in 'bbox' or not.
+        """
+        st = self.imageStates[self.currentImageIndex]["state"]
+        if st == "bbox":
+            self.addInclusionPointsButton.enabled = True
+            self.addExclusionPointsButton.enabled = True
+            self.clearPointsButton.enabled = True
+            # If user was in place mode, they'd have to press 'Stop Adding' first
+            # but we won't override that here. Just ensure the 'Stop Adding' button
+            # is only enabled if we are in place mode.
+        else:
+            self.addInclusionPointsButton.enabled = False
+            self.addExclusionPointsButton.enabled = False
+            self.clearPointsButton.enabled = False
+            self.stopAddingPointsButton.enabled = False
+
+    #
+    # ---------------------------
+    # End of "New UI" segment
+    # ---------------------------
+    #
+
     def getUserSelectedResolutionFactor(self):
         if self.radioHalf.isChecked():
             return 0.5
@@ -836,8 +1063,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         lm.sliceWidget('Red').sliceLogic().FitSliceToAll()
         lm.sliceWidget('Red2').sliceLogic().FitSliceToAll()
 
-        # If state == "bbox", we let user place exclusion points. Otherwise, disable them
-        self.updateExclusionPointButtons()
+        # If state == "bbox", enable the new inclusion/exclusion points
+        self.updatePointButtons()
 
     def getDownsampledColor(self, setName, index):
         downKey = (setName, index, 'down')
@@ -973,8 +1200,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def onMaskCurrentImageClicked(self):
         """
-        Merge bounding-box finalization + SAM + negative points if any.
-        After saving, we remove the old mask from cache to ensure we see the new mask.
+        Merge bounding-box finalization + SAM + negative (exclusion) + positive (inclusion) points if any.
         """
         stInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stInfo:
@@ -985,7 +1211,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if self.boundingBoxRoiNode:
             self.finalizeBoundingBoxAndRemoveROI()
 
-        # Now stInfo should be "bbox"
         stInfo = self.imageStates.get(self.currentImageIndex, None)
         if not stInfo or stInfo["state"] != "bbox":
             slicer.util.warningDisplay("No bounding box defined or finalized for this image. Cannot mask.")
@@ -994,49 +1219,41 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         import numpy as np
         import cv2
 
-        # user-chosen factor
         resFactor = self.getUserSelectedResolutionFactor()
 
         bboxDown = stInfo["bboxCoords"]
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, self.currentImageIndex)
         colorArrFull = self.getFullColorArray(self.currentSet, self.currentImageIndex)
 
-        # Gather negative points
-        pointCoordsFull = []
-        if self.exclusionPointNode:
-            numPoints = self.exclusionPointNode.GetNumberOfControlPoints()
-            for i in range(numPoints):
-                ras = [0,0,0]
-                self.exclusionPointNode.GetNthControlPointPositionWorld(i, ras)
-                ijk = self.rasToDownsampleIJK(ras, self.masterVolumeNode)
-                ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
-                pointCoordsFull.append(ptFull)
+        # Gather negative points (exclusion) from node
+        negPointsFull = []
+        numNeg = self.exclusionPointNode.GetNumberOfControlPoints()
+        for i in range(numNeg):
+            ras = [0, 0, 0]
+            self.exclusionPointNode.GetNthControlPointPositionWorld(i, ras)
+            ijk = self.rasToDownsampleIJK(ras, self.masterVolumeNode)
+            ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
+            negPointsFull.append(ptFull)
 
-        # We'll do full-res path here (resFactor check).
+        # Gather positive points (inclusion) from node
+        posPointsFull = []
+        numPos = self.inclusionPointNode.GetNumberOfControlPoints()
+        for i in range(numPos):
+            ras = [0, 0, 0]
+            self.inclusionPointNode.GetNthControlPointPositionWorld(i, ras)
+            ijk = self.rasToDownsampleIJK(ras, self.masterVolumeNode)
+            ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
+            posPointsFull.append(ptFull)
+
+        # We'll do the full-res path here
         opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
         marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
-        if len(marker_outputs) == 0:
-            mask = self.logic.run_sam_segmentation_with_points(
-                image_rgb=colorArrFull,
-                bounding_box=bboxFull,
-                neg_points=pointCoordsFull
-            )
-        else:
-            import torch
-            all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
-            self.logic.predictor.set_image(colorArrFull)
-            combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
-            for box in all_boxes:
-                with torch.no_grad():
-                    masks, _, _ = self.logic.predictor.predict(
-                        point_coords=self.logic.build_point_tensor(pointCoordsFull),
-                        point_labels=self.logic.build_label_tensor(pointCoordsFull, label=0),
-                        box=box,
-                        multimask_output=False
-                    )
-                combined_mask = np.logical_or(combined_mask, masks[0].astype(bool))
-            mask = combined_mask.astype(np.uint8)
+        # Run SAM with both sets of points
+        mask = self.logic.run_sam_segmentation_with_incl_excl(
+            colorArrFull, bboxFull, posPointsFull, negPointsFull,
+            marker_outputs
+        )
 
         stInfo["state"] = "masked"
         maskBool = (mask > 0)
@@ -1048,11 +1265,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
-
-        # Remove negative points
-        self.removeAllExclusionPoints()
-        self.addExclusionPointButton.enabled = False
-        self.clearExclusionPointsButton.enabled = False
 
         # Restore normal button states
         self.restoreButtonStates()
@@ -1115,31 +1327,77 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("Current image is not masked or has no bounding box info.")
             return
 
+        # We'll reuse the same bounding box from the current image
         bboxDown = stInfo["bboxCoords"]
-        self.maskAllProgressBar.setVisible(True)
-        self.maskAllProgressBar.setTextVisible(True)
+
+        # We'll also reuse the same sets of positive & negative points for the entire set
+        negPointsFull = []
+        numNeg = self.exclusionPointNode.GetNumberOfControlPoints()
+        for i in range(numNeg):
+            ras = [0, 0, 0]
+            self.exclusionPointNode.GetNthControlPointPositionWorld(i, ras)
+            ijk = self.rasToDownsampleIJK(ras, self.masterVolumeNode)
+            ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
+            negPointsFull.append(ptFull)
+
+        posPointsFull = []
+        numPos = self.inclusionPointNode.GetNumberOfControlPoints()
+        for i in range(numPos):
+            ras = [0, 0, 0]
+            self.inclusionPointNode.GetNthControlPointPositionWorld(i, ras)
+            ijk = self.rasToDownsampleIJK(ras, self.masterVolumeNode)
+            ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
+            posPointsFull.append(ptFull)
+
+        # Identify images that are not yet masked (excluding current)
         toMask = [
             i for i in range(len(self.imagePaths))
             if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"
         ]
         n = len(toMask)
+
+        # If there are no unmasked images, prompt the user to overwrite or cancel
+        if n == 0:
+            choice = slicer.util.confirmYesNoDisplay(
+                "All images in this set are already masked.\n\n"
+                "Would you like to **overwrite** existing masks for all images?"
+            )
+            if not choice:
+                # User chose No => Cancel
+                slicer.util.infoDisplay("Mask all images canceled.")
+                return
+            else:
+                # User chose Yes => we will mask all images in the set except current
+                toMask = [i for i in range(len(self.imagePaths)) if i != self.currentImageIndex]
+                n = len(toMask)
+                if n == 0:
+                    # Edge case: if there's only one image in the set (the current),
+                    # or for some reason we have no additional images
+                    slicer.util.infoDisplay("No other images available to overwrite. Nothing done.")
+                    return
+
+        # Now proceed with the normal "mask all" process
+        self.maskAllProgressBar.setVisible(True)
+        self.maskAllProgressBar.setTextVisible(True)
         self.maskAllProgressBar.setRange(0, n)
         self.maskAllProgressBar.setValue(0)
-
-        if n == 0:
-            slicer.util.infoDisplay("All images in this set are already masked.")
-            self.maskAllProgressBar.setVisible(False)
-            return
 
         import time
         start_time = time.time()
 
         resFactor = self.getUserSelectedResolutionFactor()
 
-        for count, i in enumerate(toMask):
-            self.maskSingleImage(i, bboxDown, resFactor)
+        for count, idx in enumerate(toMask):
+            self.maskSingleImage(
+                idx,
+                bboxDown,
+                posPointsFull,
+                negPointsFull,
+                resFactor
+            )
             processed = count + 1
             self.maskAllProgressBar.setValue(processed)
+
             elapsed_secs = time.time() - start_time
             avg = elapsed_secs / processed
             remain = avg * (n - processed)
@@ -1163,16 +1421,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         end_time = time.time()
         print(f"Set Masking execution time: {end_time - start_time:.6f} seconds")
 
-        slicer.util.infoDisplay("All images in set masked and saved.")
+        slicer.util.infoDisplay("All images in set masked (overwritten if chosen) and saved.")
         self.maskAllProgressBar.setVisible(False)
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-    def maskSingleImage(self, index, bboxDown, resFactor=1.0):
+    def maskSingleImage(self, index, bboxDown, posPointsFull, negPointsFull, resFactor=1.0):
         import numpy as np
         import cv2
-        import torch
 
         bboxFull = self.downBboxToFullBbox(bboxDown, self.currentSet, index)
         colorArrFull = self.getFullColorArray(self.currentSet, index)
@@ -1181,27 +1438,21 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
             marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
-            if len(marker_outputs) == 0:
-                mask = self.logic.run_sam_segmentation(colorArrFull, bboxFull)
-            else:
-                all_boxes = self.assemble_bboxes(np.array(bboxFull, dtype=np.int32), marker_outputs, pad=25)
-                self.logic.predictor.set_image(colorArrFull)
-                combined_mask = np.zeros((colorArrFull.shape[0], colorArrFull.shape[1]), dtype=bool)
-                for box in all_boxes:
-                    with torch.no_grad():
-                        masks, _, _ = self.logic.predictor.predict(
-                            point_coords=None,
-                            point_labels=None,
-                            box=box,
-                            multimask_output=False
-                        )
-                    combined_mask = np.logical_or(combined_mask, masks[0].astype(bool))
-                mask = combined_mask.astype(np.uint8)
+            mask = self.logic.run_sam_segmentation_with_incl_excl(
+                colorArrFull,
+                bboxFull,
+                posPointsFull,
+                negPointsFull,
+                marker_outputs
+            )
+
         else:
+            # Downsample approach
             H, W, _ = colorArrFull.shape
             newW = int(round(W * resFactor))
             newH = int(round(H * resFactor))
 
+            import cv2
             colorDown = cv2.resize(colorArrFull, (newW, newH), interpolation=cv2.INTER_AREA)
 
             xMinF, yMinF, xMaxF, yMaxF = bboxFull
@@ -1210,29 +1461,26 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             yMinDown = int(round(yMinF * resFactor))
             yMaxDown = int(round(yMaxF * resFactor))
 
+            # Convert points
+            posDown = [
+                [int(round(px * resFactor)), int(round(py * resFactor))]
+                for (px, py) in posPointsFull
+            ]
+            negDown = [
+                [int(round(px * resFactor)), int(round(py * resFactor))]
+                for (px, py) in negPointsFull
+            ]
+
             opencvDown = self.logic.pil_to_opencv(self.logic.array_to_pil(colorDown))
             marker_outputs = self.detect_aruco_bounding_boxes(opencvDown, aruco_dict=cv2.aruco.DICT_4X4_250)
 
-            if len(marker_outputs) == 0:
-                maskDown = self.logic.run_sam_segmentation(colorDown, [xMinDown, yMinDown, xMaxDown, yMaxDown])
-            else:
-                all_boxes = self.assemble_bboxes(
-                    np.array([xMinDown, yMinDown, xMaxDown, yMaxDown], dtype=np.int32),
-                    marker_outputs,
-                    pad=25
-                )
-                self.logic.predictor.set_image(colorDown)
-                combined_mask = np.zeros((newH, newW), dtype=bool)
-                for box in all_boxes:
-                    with torch.no_grad():
-                        masks, _, _ = self.logic.predictor.predict(
-                            point_coords=None,
-                            point_labels=None,
-                            box=box,
-                            multimask_output=False
-                        )
-                    combined_mask = np.logical_or(combined_mask, masks[0].astype(bool))
-                maskDown = combined_mask.astype(np.uint8)
+            maskDown = self.logic.run_sam_segmentation_with_incl_excl(
+                colorDown,
+                [xMinDown, yMinDown, xMaxDown, yMaxDown],
+                posDown,
+                negDown,
+                marker_outputs
+            )
 
             mask = cv2.resize(maskDown, (W, H), interpolation=cv2.INTER_NEAREST)
 
@@ -1244,9 +1492,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.saveMaskedImage(index, colorArrFull, maskBool)
 
     def saveMaskedImage(self, index, colorArrFull, maskBool):
-        """
-        Save the new mask to disk and remove any cached old masks so we see the updated mask next time.
-        """
         from PIL import Image
         setData = self.setStates[self.currentSet]
         exifMap = setData.get("exifData", {})
@@ -1279,14 +1524,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         maskPath = os.path.join(setOutputFolder, maskFilename)
         maskPil.save(maskPath, "jpeg")
 
-        # --- NEW: remove any old mask entries from the cache so we load the updated version
+        # remove any old mask entries from the cache so we load the updated version
         maskCacheKey = (self.currentSet, index, 'mask')
         maskCacheKeyDown = (self.currentSet, index, 'mask-down')
         if maskCacheKey in self.imageCache:
             del self.imageCache[maskCacheKey]
         if maskCacheKeyDown in self.imageCache:
             del self.imageCache[maskCacheKeyDown]
-        # ---
 
     def removeBboxLines(self):
         for ln in self.currentBboxLineNodes:
@@ -1338,7 +1582,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         if s == "masked":
             if slicer.util.confirmYesNoDisplay(
-                "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
+                    "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
             ):
                 self.removeMaskFromCurrentImage()
                 self.startPlacingROI()
@@ -1346,7 +1590,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 self.restoreButtonStates()
         elif s == "bbox":
             if slicer.util.confirmYesNoDisplay(
-                "A bounding box already exists. Creating a new one will remove it. Proceed?"
+                    "A bounding box already exists. Creating a new one will remove it. Proceed?"
             ):
                 self.removeBboxFromCurrentImage()
                 self.startPlacingROI()
@@ -1406,8 +1650,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             autoCloseMsec=6000
         )
 
-        self.addExclusionPointButton.enabled = True
-        self.clearExclusionPointsButton.enabled = True
+        # Also allow user to use inclusion/exclusion points
+        self.addInclusionPointsButton.enabled = True
+        self.addExclusionPointsButton.enabled = True
+        self.clearPointsButton.enabled = True
         self.maskCurrentImageButton.enabled = True
 
     def checkROIPlacementComplete(self, caller, event):
@@ -1494,124 +1740,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         y_minF = int(round(y_minD * scaleY))
         y_maxF = int(round(y_maxD * scaleY))
         return (x_minF, y_minF, x_maxF, y_maxF)
-
-    #
-    # Exclusion Points Logic
-    #
-    def updateExclusionPointButtons(self):
-        st = self.imageStates[self.currentImageIndex]["state"]
-        if st == "bbox":
-            self.addExclusionPointButton.enabled = True
-            self.clearExclusionPointsButton.enabled = True
-        else:
-            self.addExclusionPointButton.enabled = False
-            self.clearExclusionPointsButton.enabled = False
-
-    def onAddExclusionPointClicked(self):
-        proceed = slicer.util.confirmYesNoDisplay(
-            "You're about to place one exclusion point on the slice. Continue?"
-        )
-        if not proceed:
-            return
-
-        #
-        # 1) If we already had an ExclusionPoints node from before, remove it
-        #
-        if self.exclusionPointNode and slicer.mrmlScene.IsNodePresent(self.exclusionPointNode):
-            slicer.mrmlScene.RemoveNode(self.exclusionPointNode)
-        self.exclusionPointNode = None
-
-        #
-        # 2) Create a new MarkupsFiducialNode from scratch
-        #
-        self.exclusionPointNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "ExclusionPoints")
-        self.exclusionPointNode.CreateDefaultDisplayNodes()
-        self.exclusionPointNode.RemoveAllControlPoints()  # remove any default point
-        self.exclusionPointNode.SetMaximumNumberOfControlPoints(1)
-
-        #
-        # 3) Place an observer to detect final placement
-        #    IMPORTANT: use PointPositionDefinedEvent instead of PointAddedEvent
-        #
-        if hasattr(self, 'exclusionPointObserverTag') and self.exclusionPointObserverTag:
-            self.exclusionPointNode.RemoveObserver(self.exclusionPointObserverTag)
-            self.exclusionPointObserverTag = None
-
-        self.exclusionPointObserverTag = self.exclusionPointNode.AddObserver(
-            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
-            self.onExclusionPointDefined
-        )
-
-        #
-        # 4) Activate "place mode" so the user can click in a slice view
-        #
-        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-
-        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
-        selectionNode.SetActivePlaceNodeID(self.exclusionPointNode.GetID())
-
-        interactionNode.SetPlaceModePersistence(0)  # or 1 if you want to keep placing multiple
-        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
-
-        slicer.util.infoDisplay(
-            "Click in a slice/3D view to place exactly one fiducial.\n"
-            "Placement mode will exit automatically."
-        )
-
-    def onExclusionPointDefined(self, caller, event):
-        # 5) Once the user has defined the point:
-        if self.exclusionPointObserverTag:
-            self.exclusionPointNode.RemoveObserver(self.exclusionPointObserverTag)
-            self.exclusionPointObserverTag = None
-
-        # Exit place mode (if you used persistence=0, Slicer does this automatically)
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetPlaceModePersistence(0)
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
-        # The node has exactly 1 user-placed point now
-        nPoints = self.exclusionPointNode.GetNumberOfControlPoints()
-        if nPoints == 1:
-            slicer.util.infoDisplay("Exclusion point placed successfully!", autoCloseMsec=3000)
-        else:
-            slicer.util.warningDisplay("No point was placed!", autoCloseMsec=3000)
-
-    def onExclusionPointAddedOnce(self, caller, event):
-        # Remove the observer by its tag
-        if hasattr(self, 'exclusionPointObserverTag') and self.exclusionPointObserverTag is not None:
-            self.exclusionPointNode.RemoveObserver(self.exclusionPointObserverTag)
-            self.exclusionPointObserverTag = None
-
-        # Turn off place mode
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetPlaceModePersistence(0)
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
-        # Deactivate the Markups node as "active place node"
-        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
-        selectionNode.SetActivePlaceNodeID(None)
-
-        nPoints = self.exclusionPointNode.GetNumberOfControlPoints()
-        if nPoints < 1:
-            slicer.util.infoDisplay("No point was placed.", autoCloseMsec=3000)
-            return
-
-        slicer.util.infoDisplay(
-            "Exclusion point added. You can move or delete it in Markups if needed.",
-            autoCloseMsec=3000
-        )
-
-    def onClearExclusionPointsClicked(self):
-        proceed = slicer.util.confirmYesNoDisplay("Clear all exclusion points?")
-        if not proceed:
-            return
-        self.removeAllExclusionPoints()
-
-    def removeAllExclusionPoints(self):
-        if self.exclusionPointNode and slicer.mrmlScene.IsNodePresent(self.exclusionPointNode):
-            slicer.mrmlScene.RemoveNode(self.exclusionPointNode)
-        self.exclusionPointNode = None
 
     def updateWebODMTaskAvailability(self):
         allSetsMasked = self.allSetsHavePhysicalMasks()
@@ -1770,7 +1898,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def onCloneFindGCPClicked(self):
         import os
         import shutil
-        import slicer
 
         try:
             import git
@@ -2176,69 +2303,69 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
                         image_paths.append(full_path)
         return sorted(image_paths)
 
-    def run_sam_segmentation(self, image_rgb, bounding_box):
+    def run_sam_segmentation_with_incl_excl(self, image_rgb, bounding_box, posPoints, negPoints, marker_outputs=None):
         """
-        Given a color array (H,W,3) and bounding box in full coords,
-        run the SAM predictor to produce a mask (no negative points).
-        """
-        if not self.predictor:
-            raise RuntimeError("SAM model is not loaded.")
-        import torch
-        import numpy as np
-        box = np.array(bounding_box, dtype=np.float32)
-        with torch.no_grad():
-            self.predictor.set_image(image_rgb)
-            masks, _, _ = self.predictor.predict(
-                point_coords=None,
-                point_labels=None,
-                box=box,
-                multimask_output=False
-            )
-        return masks[0].astype(np.uint8)
+        Given a color array (H,W,3), bounding box in full coords,
+        plus sets of positive 2D points (label=1) and negative 2D points (label=0),
+        run the SAM predictor to produce a mask.
 
-    def run_sam_segmentation_with_points(self, image_rgb, bounding_box, neg_points):
-        """
-        Given a color array (H,W,3), bounding box in full coords, and a list
-        of negative 2D points, run SAM predictor to produce a mask that excludes them.
+        If marker_outputs is given, we create multiple bounding boxes (the main one + around any ArUco markers).
         """
         if not self.predictor:
             raise RuntimeError("SAM model is not loaded.")
+
         import torch
         import numpy as np
 
-        box = np.array(bounding_box, dtype=np.float32)
-        ptCoords = self.build_point_tensor(neg_points)  # Nx2
-        ptLabels = self.build_label_tensor(neg_points, label=0)  # exclude
+        if marker_outputs is None:
+            marker_outputs = []
+
+        # Build the big bounding box set
+        mainBox = np.array(bounding_box, dtype=np.int32)
+        all_boxes = [mainBox]
+        for marker_dict in marker_outputs:
+            x_min, y_min, x_max, y_max = marker_dict["bbox"]
+            # pad around each marker
+            pad = 25
+            x_min_new = x_min - pad
+            y_min_new = y_min - pad
+            x_max_new = x_max + pad
+            y_max_new = y_max + pad
+            all_boxes.append(np.array([x_min_new, y_min_new, x_max_new, y_max_new], dtype=np.int32))
+
+        # Combine points
+        allPointCoords = []
+        allLabels = []
+        if posPoints:
+            allPointCoords.extend(posPoints)
+            allLabels.extend([1] * len(posPoints))
+        if negPoints:
+            allPointCoords.extend(negPoints)
+            allLabels.extend([0] * len(negPoints))
+
+        allPointCoords = np.array(allPointCoords, dtype=np.float32) if allPointCoords else None
+        allLabels = np.array(allLabels, dtype=np.int32) if allLabels else None
+
+        self.predictor.set_image(image_rgb)
+        h, w, _ = image_rgb.shape
+        combined_mask = np.zeros((h, w), dtype=bool)
 
         with torch.no_grad():
-            self.predictor.set_image(image_rgb)
-            masks, _, _ = self.predictor.predict(
-                point_coords=ptCoords,
-                point_labels=ptLabels,
-                box=box,
-                multimask_output=False
-            )
-        return masks[0].astype(np.uint8)
+            for box in all_boxes:
+                masks, scores, logits = self.predictor.predict(
+                    point_coords=allPointCoords,
+                    point_labels=allLabels,
+                    box=box,
+                    multimask_output=False
+                )
+                mask_bool = masks[0].astype(bool)
+                combined_mask = np.logical_or(combined_mask, mask_bool)
 
-    def build_point_tensor(self, pointsList):
-        import numpy as np
-        if not pointsList:
-            return None
-        return np.array(pointsList, dtype=np.float32)
-
-
-    def build_label_tensor(self, pointsList, label=0):
-        """
-        Return Nx1 array of all label=0 if points exist, else None
-        """
-        import numpy as np
-        if not pointsList:
-            return None
-        return np.array([label]*len(pointsList), dtype=np.int32)
-    # --- END NEW / MODIFIED ---
+        return combined_mask.astype(np.uint8)
 
     def array_to_pil(self, colorArr):
         from PIL import Image
+        import numpy as np
         return Image.fromarray(colorArr.astype(np.uint8))
 
     def pil_to_opencv(self, pil_image):
