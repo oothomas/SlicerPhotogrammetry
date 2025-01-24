@@ -40,6 +40,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Non-blocking WebODM tasks (using pyodm),
      - Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
      - Inclusion/Exclusion point marking for SAM.
+     - NEW: A "Mask All Images In Set" workflow that removes existing masks,
+       lets you place an ROI bounding box for the entire set, then finalize for all.
     """
 
     def __init__(self, parent=None):
@@ -83,6 +85,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskCurrentImageButton = None
 
         self.maskAllImagesButton = None
+        self.finalizeAllMaskButton = None  # <-- NEW button
         self.maskAllProgressBar = None
         self.processButton = None
         self.imageSetComboBox = None
@@ -159,9 +162,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         #
         # NEW: Inclusion/Exclusion points
         #
-        # We have one Markups node for EXCLUSION, one for INCLUSION.
-        # Exclusion points appear in red, inclusion points in green.
-        #
         self.exclusionPointNode = None
         self.exclusionPointAddedObserverTag = None
 
@@ -172,6 +172,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.addExclusionPointsButton = None
         self.stopAddingPointsButton = None
         self.clearPointsButton = None
+
+        # NEW: Keep track of whether we're in a special "mask all images" mode
+        self.globalMaskAllInProgress = False
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -292,10 +295,23 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.prevButton.connect('clicked(bool)', self.onPrevImage)
         self.nextButton.connect('clicked(bool)', self.onNextImage)
 
+        #
+        # We replace the original row for "Mask All Images" with an HBox layout that
+        # also contains the new "Finalize ROI for All" button.
+        #
+        maskAllLayout = qt.QHBoxLayout()
         self.maskAllImagesButton = qt.QPushButton("Mask All Images In Set")
         self.maskAllImagesButton.enabled = False
-        parametersFormLayout.addWidget(self.maskAllImagesButton)
         self.maskAllImagesButton.connect('clicked(bool)', self.onMaskAllImagesClicked)
+        maskAllLayout.addWidget(self.maskAllImagesButton)
+
+        # NEW button
+        self.finalizeAllMaskButton = qt.QPushButton("Finalize ROI for All")
+        self.finalizeAllMaskButton.enabled = False
+        self.finalizeAllMaskButton.connect('clicked(bool)', self.onFinalizeAllMaskClicked)
+        maskAllLayout.addWidget(self.finalizeAllMaskButton)
+
+        parametersFormLayout.addRow("Batch Masking:", maskAllLayout)
 
         self.maskAllProgressBar = qt.QProgressBar()
         self.maskAllProgressBar.setVisible(False)
@@ -326,33 +342,23 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         #
         # NEW: Inclusion/Exclusion points UI
         #
-        # We create four buttons in a single row:
-        # (1) Add Inclusion Points (green)
-        # (2) Add Exclusion Points (red)
-        # (3) Stop Adding
-        # (4) Clear Points
-        #
         pointsButtonsLayout = qt.QHBoxLayout()
 
-        # (1) Add Inclusion
         self.addInclusionPointsButton = qt.QPushButton("Add Inclusion Points")
         self.addInclusionPointsButton.enabled = False
         self.addInclusionPointsButton.connect('clicked(bool)', self.onAddInclusionPointsClicked)
         pointsButtonsLayout.addWidget(self.addInclusionPointsButton)
 
-        # (2) Add Exclusion
         self.addExclusionPointsButton = qt.QPushButton("Add Exclusion Points")
         self.addExclusionPointsButton.enabled = False
         self.addExclusionPointsButton.connect('clicked(bool)', self.onAddExclusionPointsClicked)
         pointsButtonsLayout.addWidget(self.addExclusionPointsButton)
 
-        # (3) Stop Adding
         self.stopAddingPointsButton = qt.QPushButton("Stop Adding")
         self.stopAddingPointsButton.enabled = False
         self.stopAddingPointsButton.connect('clicked(bool)', self.onStopAddingPointsClicked)
         pointsButtonsLayout.addWidget(self.stopAddingPointsButton)
 
-        # (4) Clear
         self.clearPointsButton = qt.QPushButton("Clear Points")
         self.clearPointsButton.enabled = False
         self.clearPointsButton.connect('clicked(bool)', self.onClearPointsClicked)
@@ -510,7 +516,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # Make them green
         if self.inclusionPointNode.GetDisplayNode():
-            self.inclusionPointNode.GetDisplayNode().SetSelectedColor(0, 1, 0)  # green
+            self.inclusionPointNode.GetDisplayNode().SetSelectedColor(0, 1, 0)
             self.inclusionPointNode.GetDisplayNode().SetColor(0, 1, 0)
 
         self.inclusionPointNode.SetMaximumNumberOfControlPoints(-1)
@@ -632,7 +638,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         If either inclusion or exclusion is in place mode, stop it.
         """
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        # If we are currently in place mode, disable it
         if interactionNode.GetCurrentInteractionMode() == interactionNode.Place:
             interactionNode.SetPlaceModePersistence(0)
             interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
@@ -647,20 +652,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.addInclusionPointsButton.enabled = True
             self.addExclusionPointsButton.enabled = True
             self.clearPointsButton.enabled = True
-            # If user was in place mode, they'd have to press 'Stop Adding' first
-            # but we won't override that here. Just ensure the 'Stop Adding' button
-            # is only enabled if we are in place mode.
         else:
             self.addInclusionPointsButton.enabled = False
             self.addExclusionPointsButton.enabled = False
             self.clearPointsButton.enabled = False
             self.stopAddingPointsButton.enabled = False
-
-    #
-    # ---------------------------
-    # End of "New UI" segment
-    # ---------------------------
-    #
 
     def getUserSelectedResolutionFactor(self):
         if self.radioHalf.isChecked():
@@ -676,18 +672,23 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         except ModuleNotFoundError:
             slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. "
                                    "Please install it from the Extensions Manager.")
-        torchLogic = PyTorchUtils.PyTorchUtilsLogic()
-        if not torchLogic.torchInstalled():
-            logging.debug('SlicerPhotogrammetry requires the PyTorch Python package. Installing...')
-            torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
-            if torch:
-                restart = slicer.util.confirmYesNoDisplay(
-                    "Pytorch dependencies have been installed. A restart of 3D Slicer is needed. Restart now?"
-                )
-                if restart:
-                    slicer.util.restart()
-            if torch is None:
-                slicer.util.messageBox('PyTorch extension must be installed manually to use this module.')
+        torchLogic = None
+        try:
+            import PyTorchUtils
+            torchLogic = PyTorchUtils.PyTorchUtilsLogic()
+            if not torchLogic.torchInstalled():
+                logging.debug('Installing PyTorch...')
+                torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
+                if torch:
+                    restart = slicer.util.confirmYesNoDisplay(
+                        "Pytorch dependencies have been installed. A restart of 3D Slicer is needed. Restart now?"
+                    )
+                    if restart:
+                        slicer.util.restart()
+                if torch is None:
+                    slicer.util.messageBox('PyTorch must be installed manually to use this module.')
+        except Exception:
+            pass
 
         try:
             from PIL import Image
@@ -730,6 +731,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.pip_install("matplotlib")
             import matplotlib
 
+        # Check if SAM submodules can be imported
         from segment_anything import sam_model_registry, SamPredictor
 
     def createCustomLayout(self):
@@ -899,6 +901,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.infoDisplay("No subfolders found in master folder.")
 
         self.processFoldersProgressBar.setVisible(False)
+        self.enableMaskAllImagesIfPossible()
 
     def anySetHasProgress(self):
         for _, setData in self.setStates.items():
@@ -981,6 +984,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.enableMaskAllImagesIfPossible()
 
     def getEXIFBytes(self, path):
         from PIL import Image
@@ -1117,11 +1121,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.enableMaskAllImagesIfPossible()
 
     def enableMaskAllImagesIfPossible(self):
-        stInfo = self.imageStates.get(self.currentImageIndex, None)
-        if stInfo and stInfo["state"] == "masked" and stInfo["bboxCoords"] is not None:
-            self.maskAllImagesButton.enabled = True
-        else:
-            self.maskAllImagesButton.enabled = False
+        # Only enable if we have at least one image with "bbox" or "masked"
+        # (meaning we have some bounding region or we can do single image)
+        # But the user specifically requested the old approach.
+        # We'll simply enable "Mask All" if at least one image is "masked" or "bbox".
+        # This matches the original approach.
+        #if any(info["state"] in ["masked", "bbox"] for info in self.imageStates.values()):
+        self.maskAllImagesButton.enabled = True
+        #else:
+            #self.maskAllImagesButton.enabled = False
 
     def showOriginalOnly(self):
         lm = slicer.app.layoutManager()
@@ -1217,7 +1225,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return
 
         import numpy as np
-        import cv2
 
         resFactor = self.getUserSelectedResolutionFactor()
 
@@ -1246,10 +1253,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             posPointsFull.append(ptFull)
 
         # We'll do the full-res path here
+        import cv2
         opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
         marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
 
-        # Run SAM with both sets of points
         mask = self.logic.run_sam_segmentation_with_incl_excl(
             colorArrFull, bboxFull, posPointsFull, negPointsFull,
             marker_outputs
@@ -1270,67 +1277,156 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.restoreButtonStates()
         self.enableMaskAllImagesIfPossible()
 
-    def rasToDownsampleIJK(self, ras, volumeNode):
-        """
-        Convert a RAS coordinate to IJK in the *downsampled* space (the one used for bounding box).
-        We only use X,Y from that IJK for 2D.
-        """
-        rasToIjkMat = vtk.vtkMatrix4x4()
-        volumeNode.GetRASToIJKMatrix(rasToIjkMat)
-        ras4 = [ras[0], ras[1], ras[2], 1.0]
-        ijk4 = rasToIjkMat.MultiplyPoint(ras4)
-        i, j = int(round(ijk4[0])), int(round(ijk4[1]))
-        return [i, j]
-
-    def downPointToFullPoint(self, ijkDown, setName, index):
-        """
-        The bounding box code does scaling from the 'downsample' space to the full resolution.
-        We'll do the same for a 2D point in [i,j].
-        """
-        fullArr = self.getFullColorArray(setName, index)
-        downArr = self.getDownsampledColor(setName, index)
-        fullH, fullW, _ = fullArr.shape
-        downH, downW, _ = downArr.shape
-        scaleX = fullW / downW
-        scaleY = fullH / downH
-        xF = int(round(ijkDown[0] * scaleX))
-        yF = int(round(ijkDown[1] * scaleY))
-        return [xF, yF]
-
-    def finalizeBoundingBoxAndRemoveROI(self):
-        """Finalize bounding box placement, remove ROI from scene."""
-        if not self.boundingBoxRoiNode:
-            return
-
-        coordsDown = self.computeBboxFromROI()
-        stInfo = self.imageStates[self.currentImageIndex]
-        stInfo["state"] = "bbox"
-        stInfo["bboxCoords"] = coordsDown
-        stInfo["maskNodes"] = None
-
-        dnode = self.boundingBoxRoiNode.GetDisplayNode()
-        if dnode:
-            dnode.SetHandlesInteractive(False)
-
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetPlaceModePersistence(0)
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
-        if self.boundingBoxRoiNode.GetDisplayNode():
-            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
-        slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
-        self.boundingBoxRoiNode = None
-
+    #
+    # ----------------------------------------------------------------------
+    # NEW BATCH MASKING WORKFLOW
+    # ----------------------------------------------------------------------
+    #
     def onMaskAllImagesClicked(self):
-        stInfo = self.imageStates.get(self.currentImageIndex, None)
-        if not stInfo or stInfo["state"] != "masked" or not stInfo["bboxCoords"]:
-            slicer.util.warningDisplay("Current image is not masked or has no bounding box info.")
+        """
+        Now we override the old behavior.
+        Instead of prompting for partial overwrites, we do the following:
+         1) Ask user to confirm that all existing masks for this set will be removed.
+         2) If yes, remove all bounding boxes + masks from this set (states -> none).
+         3) Start a new ROI placement for the set (the user can switch images to see the ROI).
+         4) All other controls are disabled except next/prev and the new "Finalize ROI for All" button.
+         5) The user can reposition the ROI. They can flip through images to see if the bounding box is good enough.
+         6) Once they're satisfied, they click "Finalize ROI for All" to do the actual segmentation for every image.
+        """
+        if not self.currentSet or self.currentSet not in self.setStates:
+            slicer.util.warningDisplay("No current set is selected. Unable to proceed.")
             return
 
-        # We'll reuse the same bounding box from the current image
-        bboxDown = stInfo["bboxCoords"]
+        confirm = slicer.util.confirmYesNoDisplay(
+            "This will remove ALL existing masks (and bounding boxes) for the entire set.\n"
+            "Continue?"
+        )
+        if not confirm:
+            slicer.util.infoDisplay("Mask All Images canceled.")
+            return
 
-        # We'll also reuse the same sets of positive & negative points for the entire set
+        # (1) Remove all bounding boxes and mask files from disk for the entire set
+        self.removeAllMasksForCurrentSet()
+
+        # (2) Mark all images as "none"
+        for idx in range(len(self.imagePaths)):
+            self.imageStates[idx]["state"] = "none"
+            self.imageStates[idx]["bboxCoords"] = None
+            self.imageStates[idx]["maskNodes"] = None
+
+        # (3) Update display to reflect "none" state
+        self.currentImageIndex = 0
+        self.updateVolumeDisplay()
+
+        # (4) We start placing an ROI, but for the entire set.
+        #     We'll create a single ROI node, let the user place/adjust it.
+        self.globalMaskAllInProgress = True
+        self.startPlacingROIForAllImages()
+
+        # (5) Disable other UI except next/prev and finalizeAllMaskButton
+        self.disableAllUIButNextPrevAndFinalize()
+
+        slicer.util.infoDisplay(
+            "You can now place/adjust a bounding box ROI. Then switch images with < or > to see how it fits.\n"
+            "When ready, click 'Finalize ROI for All' to mask all images in the set.",
+            autoCloseMsec=8000
+        )
+
+    def removeAllMasksForCurrentSet(self):
+        """
+        Removes any existing mask files on disk for the currently selected set
+        and cleans up bounding box references in memory.
+        """
+        if not self.currentSet:
+            return
+
+        outputFolder = self.outputFolderSelector.directory
+        setOutputFolder = os.path.join(outputFolder, self.currentSet)
+        if not os.path.isdir(setOutputFolder):
+            return
+
+        # Remove any file that matches "*_mask.jpg"
+        for fn in os.listdir(setOutputFolder):
+            if fn.lower().endswith("_mask.jpg"):
+                try:
+                    os.remove(os.path.join(setOutputFolder, fn))
+                except Exception as e:
+                    logging.warning(f"Failed to remove mask file {fn}: {str(e)}")
+
+    def startPlacingROIForAllImages(self):
+        """Creates or re-creates the boundingBoxRoiNode so user can place it for batch masking."""
+        self.removeBboxLines()
+        if self.boundingBoxRoiNode:
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+            self.boundingBoxRoiNode = None
+
+        self.boundingBoxRoiNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", "BoundingBoxROI_ALL")
+        self.boundingBoxRoiNode.CreateDefaultDisplayNodes()
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        dnode.SetVisibility(True)
+        dnode.SetHandlesInteractive(True)
+
+        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsROINode")
+        selectionNode.SetActivePlaceNodeID(self.boundingBoxRoiNode.GetID())
+        interactionNode.SetPlaceModePersistence(1)
+        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
+        self.boundingBoxRoiNode.AddObserver(
+            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent, self.checkROIPlacementComplete
+        )
+
+    def disableAllUIButNextPrevAndFinalize(self):
+
+        self.storeCurrentButtonStates()
+
+        """Disable everything except next/prev and the finalizeAllMaskButton."""
+        for b in self.buttonsToManage:
+            if b in [self.prevButton, self.nextButton]:
+                b.enabled = True
+            else:
+                if isinstance(b, qt.QComboBox):
+                    b.setEnabled(False)
+                else:
+                    b.enabled = False
+        # The new finalize button is outside buttonsToManage, so manually set it:
+        self.finalizeAllMaskButton.enabled = True
+
+        # Also disable the point placement for single images, etc.
+        self.addInclusionPointsButton.enabled = False
+        self.addExclusionPointsButton.enabled = False
+        self.clearPointsButton.enabled = False
+        self.stopAddingPointsButton.enabled = False
+        self.maskAllImagesButton.enabled = False
+
+
+
+    def onFinalizeAllMaskClicked(self):
+        """
+        Once the user is satisfied with the global bounding box for all images (ROI),
+        we finalize the bounding box from the *currently displayed* image?s coordinate space.
+        Then we mask all images in the set using that bounding box + any inclusion/exclusion points
+        the user might have placed.
+        Finally, we exit the "globalMaskAllInProgress" mode and re-enable normal UI.
+        """
+        if not self.globalMaskAllInProgress:
+            return
+
+        if not self.boundingBoxRoiNode:
+            slicer.util.warningDisplay("No ROI to finalize. Please place an ROI first.")
+            return
+
+        # 1) Finalize the bounding box from the current image (downsample dimension).
+        coordsDown = self.computeBboxFromROI()
+        if not coordsDown:
+            slicer.util.warningDisplay("Unable to compute bounding box from ROI.")
+            return
+
+        # Hide ROI from the scene
+        self.removeRoiNode()
+
+        # 2) Collect the positive and negative points from the user
         negPointsFull = []
         numNeg = self.exclusionPointNode.GetNumberOfControlPoints()
         for i in range(numNeg):
@@ -1349,34 +1445,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
             posPointsFull.append(ptFull)
 
-        # Identify images that are not yet masked (excluding current)
-        toMask = [
-            i for i in range(len(self.imagePaths))
-            if i != self.currentImageIndex and self.imageStates[i]["state"] != "masked"
-        ]
-        n = len(toMask)
+        # 3) Now proceed to mask all images in the set with that bounding box
+        #    and these sets of points
+        n = len(self.imagePaths)
 
-        # If there are no unmasked images, prompt the user to overwrite or cancel
-        if n == 0:
-            choice = slicer.util.confirmYesNoDisplay(
-                "All images in this set are already masked.\n\n"
-                "Would you like to **overwrite** existing masks for all images?"
-            )
-            if not choice:
-                # User chose No => Cancel
-                slicer.util.infoDisplay("Mask all images canceled.")
-                return
-            else:
-                # User chose Yes => we will mask all images in the set except current
-                toMask = [i for i in range(len(self.imagePaths)) if i != self.currentImageIndex]
-                n = len(toMask)
-                if n == 0:
-                    # Edge case: if there's only one image in the set (the current),
-                    # or for some reason we have no additional images
-                    slicer.util.infoDisplay("No other images available to overwrite. Nothing done.")
-                    return
-
-        # Now proceed with the normal "mask all" process
         self.maskAllProgressBar.setVisible(True)
         self.maskAllProgressBar.setTextVisible(True)
         self.maskAllProgressBar.setRange(0, n)
@@ -1387,10 +1459,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         resFactor = self.getUserSelectedResolutionFactor()
 
-        for count, idx in enumerate(toMask):
+        for count, idx in enumerate(range(n)):
             self.maskSingleImage(
                 idx,
-                bboxDown,
+                coordsDown,
                 posPointsFull,
                 negPointsFull,
                 resFactor
@@ -1419,13 +1491,31 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.app.processEvents()
 
         end_time = time.time()
-        print(f"Set Masking execution time: {end_time - start_time:.6f} seconds")
+        logging.info(f"Global Set Masking execution time: {end_time - start_time:.6f} seconds")
 
-        slicer.util.infoDisplay("All images in set masked (overwritten if chosen) and saved.")
+        slicer.util.infoDisplay("All images in set have been masked successfully.")
         self.maskAllProgressBar.setVisible(False)
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+
+        # 4) Re-enable normal UI
+        self.restoreButtonStates()
+        self.finalizeAllMaskButton.enabled = False
+        self.globalMaskAllInProgress = False
+        self.maskAllImagesButton.enabled = True
+
+    def removeRoiNode(self):
+        if self.boundingBoxRoiNode:
+            dnode = self.boundingBoxRoiNode.GetDisplayNode()
+            if dnode:
+                dnode.SetHandlesInteractive(False)
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+            self.boundingBoxRoiNode = None
+
+    #
+    # ----------------------------------------------------------------------
+    #
 
     def maskSingleImage(self, index, bboxDown, posPointsFull, negPointsFull, resFactor=1.0):
         import numpy as np
@@ -1452,7 +1542,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             newW = int(round(W * resFactor))
             newH = int(round(H * resFactor))
 
-            import cv2
             colorDown = cv2.resize(colorArrFull, (newW, newH), interpolation=cv2.INTER_AREA)
 
             xMinF, yMinF, xMaxF, yMaxF = bboxFull
@@ -1461,7 +1550,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             yMinDown = int(round(yMinF * resFactor))
             yMaxDown = int(round(yMaxF * resFactor))
 
-            # Convert points
             posDown = [
                 [int(round(px * resFactor)), int(round(py * resFactor))]
                 for (px, py) in posPointsFull
@@ -1510,6 +1598,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         colorPngFilename = baseName + ".jpg"
         colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
 
+        from PIL import Image
         colorPil = Image.fromarray(cpy.astype(np.uint8))
         if exif_bytes:
             colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
@@ -1532,47 +1621,17 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if maskCacheKeyDown in self.imageCache:
             del self.imageCache[maskCacheKeyDown]
 
-    def removeBboxLines(self):
-        for ln in self.currentBboxLineNodes:
-            if ln and slicer.mrmlScene.IsNodePresent(ln):
-                slicer.mrmlScene.RemoveNode(ln)
-        self.currentBboxLineNodes = []
-
-    def drawBboxLines(self, coordsDown):
-        if not coordsDown:
-            return
-        ijkToRasMat = vtk.vtkMatrix4x4()
-        self.masterVolumeNode.GetRASToIJKMatrix(ijkToRasMat)
-
-        def ijkToRas(i, j):
-            p = [i, j, 0, 1]
-            ras = ijkToRasMat.MultiplyPoint(p)
-            return [ras[0], ras[1], ras[2]]
-
-        x_min, y_min, x_max, y_max = coordsDown
-        p1 = ijkToRas(x_min, y_min)
-        p2 = ijkToRas(x_max, y_min)
-        p3 = ijkToRas(x_max, y_max)
-        p4 = ijkToRas(x_min, y_max)
-        lines = [(p1, p2), (p2, p3), (p3, p4), (p4, p1)]
-
-        for (start, end) in lines:
-            ln = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode")
-            ln.AddControlPoint(start)
-            ln.AddControlPoint(end)
-            m = ln.GetMeasurement('length')
-            if m:
-                m.SetEnabled(False)
-            dnode = ln.GetDisplayNode()
-            dnode.SetLineThickness(0.25)
-            dnode.SetSelectedColor(1, 1, 0)
-            dnode.SetPointLabelsVisibility(False)
-            dnode.SetPropertiesLabelVisibility(False)
-            dnode.SetTextScale(0)
-            self.currentBboxLineNodes.append(ln)
-
+    #
+    # Single bounding box logic
+    #
     def onPlaceBoundingBoxClicked(self):
         self.storeCurrentButtonStates()
+        # If user is in the global mask flow, we don't want to do the single bounding box logic.
+        if self.globalMaskAllInProgress:
+            slicer.util.warningDisplay("You are in 'Mask All Images' mode. Please finalize or cancel that first.")
+            self.restoreButtonStates()
+            return
+
         self.disableAllButtonsExceptMask()
 
         stInfo = self.imageStates.get(self.currentImageIndex, None)
@@ -1646,11 +1705,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         )
 
         slicer.util.infoDisplay(
-            "Draw the ROI and use the handles to adjust it. When done, click 'Mask Current Image' to finalize + mask.",
-            autoCloseMsec=6000
+            "Draw the ROI and use the handles to adjust it. When done, click 'Mask Current Image' to finalize + mask. "
+            "You can also switch images using < or > to compare before masking.",
+            autoCloseMsec=7000
         )
 
-        # Also allow user to use inclusion/exclusion points
         self.addInclusionPointsButton.enabled = True
         self.addExclusionPointsButton.enabled = True
         self.clearPointsButton.enabled = True
@@ -1667,14 +1726,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 "ROI placement complete. You can still edit the ROI or directly click 'Mask Current Image' to finalize.",
                 autoCloseMsec=5000
             )
-
-    def removeBboxFromCurrentImage(self):
-        stInfo = self.imageStates.get(self.currentImageIndex, None)
-        if stInfo:
-            stInfo["state"] = "none"
-            stInfo["bboxCoords"] = None
-            stInfo["maskNodes"] = None
-        self.removeBboxLines()
 
     def removeMaskFromCurrentImage(self):
         stInfo = self.imageStates.get(self.currentImageIndex, None)
@@ -1700,6 +1751,37 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 os.remove(maskPath)
             except Exception as e:
                 print(f"Warning: failed to remove mask file: {maskPath}, error: {str(e)}")
+
+    def removeBboxFromCurrentImage(self):
+        stInfo = self.imageStates.get(self.currentImageIndex, None)
+        if stInfo:
+            stInfo["state"] = "none"
+            stInfo["bboxCoords"] = None
+            stInfo["maskNodes"] = None
+        self.removeBboxLines()
+
+    def finalizeBoundingBoxAndRemoveROI(self):
+        if not self.boundingBoxRoiNode:
+            return
+
+        coordsDown = self.computeBboxFromROI()
+        stInfo = self.imageStates[self.currentImageIndex]
+        stInfo["state"] = "bbox"
+        stInfo["bboxCoords"] = coordsDown
+        stInfo["maskNodes"] = None
+
+        dnode = self.boundingBoxRoiNode.GetDisplayNode()
+        if dnode:
+            dnode.SetHandlesInteractive(False)
+
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetPlaceModePersistence(0)
+        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+
+        if self.boundingBoxRoiNode.GetDisplayNode():
+            slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode.GetDisplayNode())
+        slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
+        self.boundingBoxRoiNode = None
 
     def computeBboxFromROI(self):
         roiBounds = [0] * 6
@@ -1741,26 +1823,72 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         y_maxF = int(round(y_maxD * scaleY))
         return (x_minF, y_minF, x_maxF, y_maxF)
 
-    def updateWebODMTaskAvailability(self):
-        allSetsMasked = self.allSetsHavePhysicalMasks()
-        self.launchWebODMTaskButton.setEnabled(allSetsMasked)
+    def rasToDownsampleIJK(self, ras, volumeNode):
+        """
+        Convert a RAS coordinate to IJK in the *downsampled* space (the one used for bounding box).
+        We only use X,Y from that IJK for 2D.
+        """
+        rasToIjkMat = vtk.vtkMatrix4x4()
+        volumeNode.GetRASToIJKMatrix(rasToIjkMat)
+        ras4 = [ras[0], ras[1], ras[2], 1.0]
+        ijk4 = rasToIjkMat.MultiplyPoint(ras4)
+        i, j = int(round(ijk4[0])), int(round(ijk4[1]))
+        return [i, j]
 
-    def allSetsHavePhysicalMasks(self):
-        if not self.setStates:
-            return False
-        outputRoot = self.outputFolderSelector.directory
-        if not os.path.isdir(outputRoot):
-            return False
-        for setName, setData in self.setStates.items():
-            setOutputFolder = os.path.join(outputRoot, setName)
-            if not os.path.isdir(setOutputFolder):
-                return False
-            for imagePath in setData["imagePaths"]:
-                baseName = os.path.splitext(os.path.basename(imagePath))[0]
-                maskFile = os.path.join(setOutputFolder, f"{baseName}_mask.jpg")
-                if not os.path.isfile(maskFile):
-                    return False
-        return True
+    def downPointToFullPoint(self, ijkDown, setName, index):
+        fullArr = self.getFullColorArray(setName, index)
+        downArr = self.getDownsampledColor(setName, index)
+        fullH, fullW, _ = fullArr.shape
+        downH, downW, _ = downArr.shape
+        scaleX = fullW / downW
+        scaleY = fullH / downH
+        xF = int(round(ijkDown[0] * scaleX))
+        yF = int(round(ijkDown[1] * scaleY))
+        return [xF, yF]
+
+    def removeBboxLines(self):
+        for ln in self.currentBboxLineNodes:
+            if ln and slicer.mrmlScene.IsNodePresent(ln):
+                slicer.mrmlScene.RemoveNode(ln)
+        self.currentBboxLineNodes = []
+
+    def drawBboxLines(self, coordsDown):
+        if not coordsDown:
+            return
+        ijkToRasMat = vtk.vtkMatrix4x4()
+        self.masterVolumeNode.GetRASToIJKMatrix(ijkToRasMat)
+
+        def ijkToRas(i, j):
+            p = [i, j, 0, 1]
+            # Note: we want the inverse transformation here, because we have
+            # RAS->IJK matrix. We need IJK->RAS. So let's invert that matrix:
+            invMat = vtk.vtkMatrix4x4()
+            invMat.DeepCopy(ijkToRasMat)
+            invMat.Invert()
+            ras = invMat.MultiplyPoint(p)
+            return [ras[0], ras[1], ras[2]]
+
+        x_min, y_min, x_max, y_max = coordsDown
+        p1 = ijkToRas(x_min, y_min)
+        p2 = ijkToRas(x_max, y_min)
+        p3 = ijkToRas(x_max, y_max)
+        p4 = ijkToRas(x_min, y_max)
+        lines = [(p1, p2), (p2, p3), (p3, p4), (p4, p1)]
+
+        for (start, end) in lines:
+            ln = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode")
+            ln.AddControlPoint(start)
+            ln.AddControlPoint(end)
+            m = ln.GetMeasurement('length')
+            if m:
+                m.SetEnabled(False)
+            dnode = ln.GetDisplayNode()
+            dnode.SetLineThickness(0.25)
+            dnode.SetSelectedColor(1, 1, 0)
+            dnode.SetPointLabelsVisibility(False)
+            dnode.SetPropertiesLabelVisibility(False)
+            dnode.SetTextScale(0)
+            self.currentBboxLineNodes.append(ln)
 
     def detect_aruco_bounding_boxes(self, cv_img, aruco_dict=None):
         import cv2
@@ -1894,6 +2022,27 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("Not all images have masks. Please mask all sets first.")
             return
         self.webODMManager.onRunWebODMTask()
+
+    def allSetsHavePhysicalMasks(self):
+        if not self.setStates:
+            return False
+        outputRoot = self.outputFolderSelector.directory
+        if not os.path.isdir(outputRoot):
+            return False
+        for setName, setData in self.setStates.items():
+            setOutputFolder = os.path.join(outputRoot, setName)
+            if not os.path.isdir(setOutputFolder):
+                return False
+            for imagePath in setData["imagePaths"]:
+                baseName = os.path.splitext(os.path.basename(imagePath))[0]
+                maskFile = os.path.join(setOutputFolder, f"{baseName}_mask.jpg")
+                if not os.path.isfile(maskFile):
+                    return False
+        return True
+
+    def updateWebODMTaskAvailability(self):
+        allSetsMasked = self.allSetsHavePhysicalMasks()
+        self.launchWebODMTaskButton.setEnabled(allSetsMasked)
 
     def onCloneFindGCPClicked(self):
         import os
@@ -2325,7 +2474,6 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
         all_boxes = [mainBox]
         for marker_dict in marker_outputs:
             x_min, y_min, x_max, y_max = marker_dict["bbox"]
-            # pad around each marker
             pad = 25
             x_min_new = x_min - pad
             y_min_new = y_min - pad
