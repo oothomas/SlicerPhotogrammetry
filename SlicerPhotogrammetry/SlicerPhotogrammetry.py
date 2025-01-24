@@ -86,6 +86,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.maskAllImagesButton = None
         self.finalizeAllMaskButton = None  # <-- NEW button
+        self.finalizingROI = False
         self.maskAllProgressBar = None
         self.processButton = None
         self.imageSetComboBox = None
@@ -1201,11 +1202,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if self.currentImageIndex > 0:
             self.currentImageIndex -= 1
             self.updateVolumeDisplay()
+            if self.finalizingROI:
+                self.maskAllImagesButton.enabled = False
 
     def onNextImage(self):
         if self.currentImageIndex < len(self.imagePaths) - 1:
             self.currentImageIndex += 1
             self.updateVolumeDisplay()
+            if self.finalizingROI:
+                self.maskAllImagesButton.enabled = False
 
     def onMaskCurrentImageClicked(self):
         """
@@ -1298,6 +1303,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
          5) The user can reposition the ROI. They can flip through images to see if the bounding box is good enough.
          6) Once they're satisfied, they click "Finalize ROI for All" to do the actual segmentation for every image.
         """
+        self.finalizingROI = True
+
         if not self.currentSet or self.currentSet not in self.setStates:
             slicer.util.warningDisplay("No current set is selected. Unable to proceed.")
             return
@@ -1507,6 +1514,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # 4) Re-enable normal UI
         self.restoreButtonStates()
         self.finalizeAllMaskButton.enabled = False
+        self.finalizingROI = False
         self.globalMaskAllInProgress = False
         self.maskAllImagesButton.enabled = True
 
