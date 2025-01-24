@@ -250,7 +250,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageSetComboBox.connect('currentIndexChanged(int)', self.onImageSetSelected)
 
         # Group box for resolution selection
-        resGroupBox = qt.QGroupBox("Segmentation Resolution")
+        resGroupBox = qt.QGroupBox("Masking Resolution")
         resLayout = qt.QVBoxLayout(resGroupBox)
 
         self.radioFull = qt.QRadioButton("Full resolution (1.0)")
@@ -291,13 +291,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # also contains the new "Finalize ROI for All" button.
         #
         maskAllLayout = qt.QHBoxLayout()
-        self.maskAllImagesButton = qt.QPushButton("Mask All Images In Set")
+        self.maskAllImagesButton = qt.QPushButton("Place/Adjust ROI for All Images")
         self.maskAllImagesButton.enabled = False
         self.maskAllImagesButton.connect('clicked(bool)', self.onMaskAllImagesClicked)
         maskAllLayout.addWidget(self.maskAllImagesButton)
 
         # NEW button
-        self.finalizeAllMaskButton = qt.QPushButton("Finalize ROI for All")
+        self.finalizeAllMaskButton = qt.QPushButton("Finalize ROI and Mask All Images")
         self.finalizeAllMaskButton.enabled = False
         self.finalizeAllMaskButton.connect('clicked(bool)', self.onFinalizeAllMaskClicked)
         maskAllLayout.addWidget(self.finalizeAllMaskButton)
@@ -311,7 +311,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.maskedCountLabel = qt.QLabel("Masked: 0/0")
         parametersFormLayout.addRow("Overall Progress:", self.maskedCountLabel)
-
 
         self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
         self.placeBoundingBoxButton.enabled = False
@@ -541,6 +540,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         """
         numPoints = caller.GetNumberOfControlPoints()
         logging.info(f"[InclusionPoints Debug] A new point was added. Current total = {numPoints}.")
+
     #
     # End Markups changes
     # ---------------------------
@@ -1128,10 +1128,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # But the user specifically requested the old approach.
         # We'll simply enable "Mask All" if at least one image is "masked" or "bbox".
         # This matches the original approach.
-        #if any(info["state"] in ["masked", "bbox"] for info in self.imageStates.values()):
+        # if any(info["state"] in ["masked", "bbox"] for info in self.imageStates.values()):
         self.maskAllImagesButton.enabled = True
-        #else:
-            #self.maskAllImagesButton.enabled = False
+        # else:
+        # self.maskAllImagesButton.enabled = False
 
     def showOriginalOnly(self):
         lm = slicer.app.layoutManager()
@@ -1204,6 +1204,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.updateVolumeDisplay()
             if self.finalizingROI:
                 self.maskAllImagesButton.enabled = False
+            else:
+                self.maskAllImagesButton.enabled = True
 
     def onNextImage(self):
         if self.currentImageIndex < len(self.imagePaths) - 1:
@@ -1211,6 +1213,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.updateVolumeDisplay()
             if self.finalizingROI:
                 self.maskAllImagesButton.enabled = False
+            else:
+                self.maskAllImagesButton.enabled = True
 
     def onMaskCurrentImageClicked(self):
         """
@@ -1412,8 +1416,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopAddingPointsButton.enabled = False
         self.maskAllImagesButton.enabled = False
 
-
-
     def onFinalizeAllMaskClicked(self):
         """
         Once the user is satisfied with the global bounding box for all images (ROI),
@@ -1434,6 +1436,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if not coordsDown:
             slicer.util.warningDisplay("Unable to compute bounding box from ROI.")
             return
+
+        self.finalizeAllMaskButton.enabled = False
 
         # Hide ROI from the scene
         self.removeRoiNode()
@@ -1513,7 +1517,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # 4) Re-enable normal UI
         self.restoreButtonStates()
-        self.finalizeAllMaskButton.enabled = False
+
         self.finalizingROI = False
         self.globalMaskAllInProgress = False
         self.maskAllImagesButton.enabled = True
