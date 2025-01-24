@@ -263,16 +263,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         parametersFormLayout.addWidget(resGroupBox)
 
-        self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
-        self.placeBoundingBoxButton.enabled = False
-        parametersFormLayout.addWidget(self.placeBoundingBoxButton)
-        self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
-
-        self.maskCurrentImageButton = qt.QPushButton("Mask Current Image")
-        self.maskCurrentImageButton.enabled = False
-        parametersFormLayout.addWidget(self.maskCurrentImageButton)
-        self.maskCurrentImageButton.connect('clicked(bool)', self.onMaskCurrentImageClicked)
-
         navLayout = qt.QGridLayout()
 
         self.prevButton = qt.QPushButton("<")
@@ -321,23 +311,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskedCountLabel = qt.QLabel("Masked: 0/0")
         parametersFormLayout.addRow("Overall Progress:", self.maskedCountLabel)
 
-        # Save references for enabling/disabling
-        self.buttonsToManage = [
-            self.masterFolderSelector,
-            self.outputFolderSelector,
-            self.processButton,
-            self.imageSetComboBox,
-            self.placeBoundingBoxButton,
-            self.maskCurrentImageButton,
-            self.maskAllImagesButton,
-            self.prevButton,
-            self.nextButton
-        ]
-        for btn in self.buttonsToManage:
-            if isinstance(btn, qt.QComboBox):
-                btn.setEnabled(False)
-            else:
-                btn.enabled = False
+
+        self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
+        self.placeBoundingBoxButton.enabled = False
+        parametersFormLayout.addWidget(self.placeBoundingBoxButton)
+        self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
 
         #
         # NEW: Inclusion/Exclusion points UI
@@ -364,7 +342,30 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.clearPointsButton.connect('clicked(bool)', self.onClearPointsClicked)
         pointsButtonsLayout.addWidget(self.clearPointsButton)
 
-        parametersFormLayout.addRow("Points:", pointsButtonsLayout)
+        parametersFormLayout.addRow("Image Masking:", pointsButtonsLayout)
+
+        self.maskCurrentImageButton = qt.QPushButton("Mask Current Image")
+        self.maskCurrentImageButton.enabled = False
+        parametersFormLayout.addWidget(self.maskCurrentImageButton)
+        self.maskCurrentImageButton.connect('clicked(bool)', self.onMaskCurrentImageClicked)
+
+        # Save references for enabling/disabling
+        self.buttonsToManage = [
+            self.masterFolderSelector,
+            self.outputFolderSelector,
+            self.processButton,
+            self.imageSetComboBox,
+            self.placeBoundingBoxButton,
+            self.maskCurrentImageButton,
+            self.maskAllImagesButton,
+            self.prevButton,
+            self.nextButton
+        ]
+        for btn in self.buttonsToManage:
+            if isinstance(btn, qt.QComboBox):
+                btn.setEnabled(False)
+            else:
+                btn.enabled = False
 
         #
         # (B) Manage WebODM (Install/Launch) Collapsible
@@ -1267,6 +1268,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         # Save the newly computed mask
         self.saveMaskedImage(self.currentImageIndex, colorArrFull, maskBool)
+
+        # Remove inclusion/exclusion points
+        self.exclusionPointNode.RemoveAllControlPoints()
+        self.inclusionPointNode.RemoveAllControlPoints()
 
         # Re-display
         self.updateVolumeDisplay()
