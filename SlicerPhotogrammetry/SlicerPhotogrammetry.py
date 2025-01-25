@@ -1,5 +1,6 @@
 import os
 import sys
+import stat
 import qt
 import ctk
 import vtk
@@ -466,6 +467,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
         self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
 
+        # Ensure the folder exists with proper permissions
+        self.ensure_webodm_folder_permissions()
+
         self.webODMManager = SlicerWebODMManager(widget=self)
         self.webODMCheckStatusButton.connect('clicked(bool)', self.webODMManager.onCheckWebODMStatusClicked)
         self.webODMInstallButton.connect('clicked(bool)', self.webODMManager.onInstallWebODMClicked)
@@ -475,6 +479,23 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Initialize Markups nodes for Inclusions and Exclusions
         self.initializeInclusionMarkupsNode()
         self.initializeExclusionMarkupsNode()
+
+    def ensure_webodm_folder_permissions(self):
+        """
+        Create the WebODM folder if it doesn't exist and set permissions.
+        """
+        try:
+            # Create the folder if it doesn't exist
+            if not os.path.exists(self.webODMLocalFolder):
+                os.makedirs(self.webODMLocalFolder)
+
+            # Set permissions: read, write, execute for everyone
+            os.chmod(self.webODMLocalFolder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+
+            logging.info(f"WebODM folder created and permissions set: {self.webODMLocalFolder}")
+
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\n{str(e)}")
 
     #
     # ---------------------------
@@ -2256,7 +2277,7 @@ class SlicerWebODMManager:
                 "-p", "3002:3000",
                 "--gpus", "all",
                 "--name", "slicer-webodm-3002",
-                "-v", f"{local_folder}:/webodm_data",
+                "-v", f"{local_folder}:/var/www/data",
                 "opendronemap/nodeodm:gpu"
             ]
             subprocess.run(cmd, check=True)
