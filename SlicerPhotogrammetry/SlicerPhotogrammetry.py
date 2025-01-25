@@ -129,19 +129,19 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "texturing-single-material": True,
             "use-3dmesh": True,
             "feature-type": "dspsift",
-            "feature-quality": "ultra",
-            "pc-quality": "ultra",
-            "max-concurrency": 32,
+            "feature-quality": "high",
+            "pc-quality": "high",
+            "max-concurrency": 16,
         }
 
         self.factorLevels = {
             "ignore-gsd": [False, True],
-            "matcher-neighbors": [0, 8, 16, 24],
+            "matcher-neighbors": [0, 8, 12, 16, 24],
             "mesh-octree-depth": [12, 13, 14],
-            "mesh-size": [300000, 500000, 750000],
+            "mesh-size": [300000, 500000, 750000, 1000000],
             "min-num-features": [10000, 20000, 50000],
-            "pc-filter": [1, 2, 3, 4, 5],
-            "depthmap-resolution": [4096, 8192]
+            "pc-filter": [3, 2, 1, 4, 5],
+            "depthmap-resolution": [2048, 3072, 4096, 8192]
         }
         self.factorComboBoxes = {}
 
@@ -2236,14 +2236,33 @@ class SlicerWebODMManager:
                 stderr=subprocess.PIPE,
                 text=True
             )
+
+            # Print output to Python console
             for line in process.stdout:
-                logging.info(line.strip())
+                logging.info(line.strip())  # Print to console
+                print(line.strip())  # Print to Python console in Slicer
             for line in process.stderr:
                 logging.error(line.strip())
+                print(line.strip())  # Print error messages to Python console
 
             return_code = process.wait()
             if return_code == 0:
                 slicer.util.infoDisplay("WebODM (GPU) image pulled successfully.")
+
+                # Check the version of the pulled image
+                version_process = subprocess.Popen(
+                    ["docker", "inspect", "--format='{{index .Config.Labels.version}}'", "opendronemap/nodeodm:gpu"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                version_output, version_error = version_process.communicate()
+                if version_output:
+                    version = version_output.strip().strip("'")
+                    slicer.util.infoDisplay(f"WebODM (GPU) version: {version}")
+                    print(f"WebODM (GPU) version: {version}")
+                elif version_error:
+                    slicer.util.errorDisplay(f"Failed to fetch WebODM version: {version_error.strip()}")
             else:
                 slicer.util.errorDisplay(
                     f"Docker pull failed. Exit code: {return_code}. Check the log for details."
