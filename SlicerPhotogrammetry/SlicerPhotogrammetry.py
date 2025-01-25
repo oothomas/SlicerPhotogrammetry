@@ -136,12 +136,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.factorLevels = {
             "ignore-gsd": [False, True],
-            "matcher-neighbors": [0, 8, 16, 24],
+            "matcher-neighbors": [0, 8, 12, 16, 24],
             "mesh-octree-depth": [12, 13, 14],
-            "mesh-size": [300000, 500000, 750000],
+            "mesh-size": [300000, 500000, 750000, 1000000],
             "min-num-features": [10000, 20000, 50000],
             "pc-filter": [3, 2, 1, 4, 5],
-            "depthmap-resolution": [2048, 4096, 8192]
+            "depthmap-resolution": [2048, 3072, 4096, 8192]
         }
         self.factorComboBoxes = {}
 
