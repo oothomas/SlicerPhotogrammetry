@@ -121,29 +121,47 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton = None
         self.lastWebODMOutputLineIndex = 0
 
-        # default params
+        # ------------------
+        # 1) Baseline params (some remain constant, others were removed to vary)
+        # ------------------
         self.baselineParams = {
-            "matcher-type": "bruteforce",
+            # Removed from baseline: "matcher-type", "feature-type", "feature-quality", "pc-quality",
+            #                       "max-concurrency" (we will let the user choose).
             "orthophoto-resolution": 0.3,
             "skip-orthophoto": True,
             "texturing-single-material": True,
             "use-3dmesh": True,
-            "feature-type": "dspsift",
-            "feature-quality": "high",
-            "pc-quality": "high",
-            "max-concurrency": 16,
         }
 
+        # ------------------
+        # 2) Factor levels, including newly added parameters
+        # ------------------
         self.factorLevels = {
+            # Original factor levels
             "ignore-gsd": [False, True],
             "matcher-neighbors": [0, 8, 12, 16, 24],
             "mesh-octree-depth": [12, 13, 14],
             "mesh-size": [300000, 500000, 750000, 1000000],
             "min-num-features": [10000, 20000, 50000],
             "pc-filter": [3, 2, 1, 4, 5],
-            "depthmap-resolution": [2048, 3072, 4096, 8192]
+            "depthmap-resolution": [2048, 3072, 4096, 8192],
+
+            # New factor-level parameters requested
+            "matcher-type": ["bow", "bruteforce", "flann"],
+            "feature-type": ["akaze", "dspsift", "hahog", "orb", "sift"],
+            "feature-quality": ["medium", "high", "ultra"],
+            "pc-quality": ["medium", "high", "ultra"],
+            "optimize-disk-space": [False, True],
+            "rerun": ["dataset", "split", "merge", "opensfm", "openmvs"],
+            "no-gpu": [False, True],
         }
         self.factorComboBoxes = {}
+
+        # We'll create separate UI elements for:
+        #  - max-concurrency (QSpinBox, 16..256)
+        #  - name (QLineEdit, default "SlicerReconstruction")
+        self.maxConcurrencySpinBox = None
+        self.datasetNameLineEdit = None
 
         self.maskedCountLabel = None
         self.layoutId = 1003
@@ -288,8 +306,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.nextButton.connect('clicked(bool)', self.onNextImage)
 
         #
-        # We replace the original row for "Mask All Images" with an HBox layout that
-        # also contains the new "Finalize ROI for All" button.
+        # "Batch Masking" row with "Mask All" + "Finalize All" buttons
         #
         maskAllLayout = qt.QHBoxLayout()
         self.maskAllImagesButton = qt.QPushButton("Place/Adjust ROI for All Images")
@@ -297,7 +314,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskAllImagesButton.connect('clicked(bool)', self.onMaskAllImagesClicked)
         maskAllLayout.addWidget(self.maskAllImagesButton)
 
-        # NEW button
         self.finalizeAllMaskButton = qt.QPushButton("Finalize ROI and Mask All Images")
         self.finalizeAllMaskButton.enabled = False
         self.finalizeAllMaskButton.connect('clicked(bool)', self.onFinalizeAllMaskClicked)
@@ -440,12 +456,22 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.nodePortSpinBox.setValue(3002)
         webodmTaskFormLayout.addRow("Node Port:", self.nodePortSpinBox)
 
+        # Create combo boxes for each factor in factorLevels
         for factorName, levels in self.factorLevels.items():
             combo = qt.QComboBox()
             for val in levels:
                 combo.addItem(str(val))
             self.factorComboBoxes[factorName] = combo
             webodmTaskFormLayout.addRow(f"{factorName}:", combo)
+
+        # Additional UI for max-concurrency (spinbox) and dataset "name" (line edit)
+        self.maxConcurrencySpinBox = qt.QSpinBox()
+        self.maxConcurrencySpinBox.setRange(16, 256)
+        self.maxConcurrencySpinBox.setValue(16)
+        webodmTaskFormLayout.addRow("max-concurrency:", self.maxConcurrencySpinBox)
+
+        self.datasetNameLineEdit = qt.QLineEdit("SlicerReconstruction")
+        webodmTaskFormLayout.addRow("name:", self.datasetNameLineEdit)
 
         self.launchWebODMTaskButton = qt.QPushButton("Run WebODM Task With Selected Parameters (non-blocking)")
         webodmTaskFormLayout.addWidget(self.launchWebODMTaskButton)
@@ -485,15 +511,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         Create the WebODM folder if it doesn't exist and set permissions.
         """
         try:
-            # Create the folder if it doesn't exist
             if not os.path.exists(self.webODMLocalFolder):
                 os.makedirs(self.webODMLocalFolder)
-
-            # Set permissions: read, write, execute for everyone
             os.chmod(self.webODMLocalFolder, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-
             logging.info(f"WebODM folder created and permissions set: {self.webODMLocalFolder}")
-
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\n{str(e)}")
 
@@ -690,6 +711,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return 1.0
 
     def load_dependencies(self):
+        """
+        Ensure all needed Python dependencies are installed.
+        """
         try:
             import PyTorchUtils
         except ModuleNotFoundError:
@@ -754,7 +778,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.pip_install("matplotlib")
             import matplotlib
 
-        # Check if SAM submodules can be imported
         from segment_anything import sam_model_registry, SamPredictor
 
     def createCustomLayout(self):
@@ -1144,15 +1167,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.enableMaskAllImagesIfPossible()
 
     def enableMaskAllImagesIfPossible(self):
-        # Only enable if we have at least one image with "bbox" or "masked"
-        # (meaning we have some bounding region or we can do single image)
-        # But the user specifically requested the old approach.
-        # We'll simply enable "Mask All" if at least one image is "masked" or "bbox".
-        # This matches the original approach.
-        # if any(info["state"] in ["masked", "bbox"] for info in self.imageStates.values()):
+        # Original logic: always enable "Mask All" if any image has 'bbox' or 'masked'.
+        # For simplicity, we can just enable it unconditionally as in the original code.
         self.maskAllImagesButton.enabled = True
-        # else:
-        # self.maskAllImagesButton.enabled = False
 
     def showOriginalOnly(self):
         lm = slicer.app.layoutManager()
@@ -1283,7 +1300,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
             posPointsFull.append(ptFull)
 
-        # We'll do the full-res path here
         import cv2
         opencvFull = self.logic.pil_to_opencv(self.logic.array_to_pil(colorArrFull))
         marker_outputs = self.detect_aruco_bounding_boxes(opencvFull, aruco_dict=cv2.aruco.DICT_4X4_250)
@@ -1319,14 +1335,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     #
     def onMaskAllImagesClicked(self):
         """
-        Now we override the old behavior.
-        Instead of prompting for partial overwrites, we do the following:
-         1) Ask user to confirm that all existing masks for this set will be removed.
-         2) If yes, remove all bounding boxes + masks from this set (states -> none).
-         3) Start a new ROI placement for the set (the user can switch images to see the ROI).
-         4) All other controls are disabled except next/prev and the new "Finalize ROI for All" button.
-         5) The user can reposition the ROI. They can flip through images to see if the bounding box is good enough.
-         6) Once they're satisfied, they click "Finalize ROI for All" to do the actual segmentation for every image.
+        Override old behavior. Removes existing masks, places a single ROI for the entire set, etc.
         """
         self.finalizingROI = True
 
@@ -1351,16 +1360,15 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.imageStates[idx]["bboxCoords"] = None
             self.imageStates[idx]["maskNodes"] = None
 
-        # (3) Update display to reflect "none" state
+        # (3) Update display
         self.currentImageIndex = 0
         self.updateVolumeDisplay()
 
-        # (4) We start placing an ROI, but for the entire set.
-        #     We'll create a single ROI node, let the user place/adjust it.
+        # (4) Start placing an ROI for all
         self.globalMaskAllInProgress = True
         self.startPlacingROIForAllImages()
 
-        # (5) Disable other UI except next/prev and finalizeAllMaskButton
+        # (5) Disable all other UI except next/prev & "Finalize ROI for All" button
         self.disableAllUIButNextPrevAndFinalize()
 
         slicer.util.infoDisplay(
@@ -1371,8 +1379,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def removeAllMasksForCurrentSet(self):
         """
-        Removes any existing mask files on disk for the currently selected set
-        and cleans up bounding box references in memory.
+        Removes any existing mask files on disk for the currently selected set.
         """
         if not self.currentSet:
             return
@@ -1382,7 +1389,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if not os.path.isdir(setOutputFolder):
             return
 
-        # Remove any file that matches "*_mask.jpg"
         for fn in os.listdir(setOutputFolder):
             if fn.lower().endswith("_mask.jpg"):
                 try:
@@ -1391,7 +1397,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     logging.warning(f"Failed to remove mask file {fn}: {str(e)}")
 
     def startPlacingROIForAllImages(self):
-        """Creates or re-creates the boundingBoxRoiNode so user can place it for batch masking."""
         self.removeBboxLines()
         if self.boundingBoxRoiNode:
             slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
@@ -1415,10 +1420,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         )
 
     def disableAllUIButNextPrevAndFinalize(self):
-
+        """
+        Disable all UI except the Next/Prev buttons and the finalizeAllMaskButton.
+        """
         self.storeCurrentButtonStates()
-
-        """Disable everything except next/prev and the finalizeAllMaskButton."""
         for b in self.buttonsToManage:
             if b in [self.prevButton, self.nextButton]:
                 b.enabled = True
@@ -1427,10 +1432,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     b.setEnabled(False)
                 else:
                     b.enabled = False
-        # The new finalize button is outside buttonsToManage, so manually set it:
         self.finalizeAllMaskButton.enabled = True
 
-        # Also disable the point placement for single images, etc.
+        # Also disable the point placement for single images
         self.addInclusionPointsButton.enabled = False
         self.addExclusionPointsButton.enabled = False
         self.clearPointsButton.enabled = False
@@ -1439,11 +1443,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def onFinalizeAllMaskClicked(self):
         """
-        Once the user is satisfied with the global bounding box for all images (ROI),
-        we finalize the bounding box from the *currently displayed* image?s coordinate space.
-        Then we mask all images in the set using that bounding box + any inclusion/exclusion points
-        the user might have placed.
-        Finally, we exit the "globalMaskAllInProgress" mode and re-enable normal UI.
+        The user finalizes the bounding box for all images, then we do the actual segmentation
+        across all images in the set.
         """
         if not self.globalMaskAllInProgress:
             return
@@ -1452,7 +1453,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay("No ROI to finalize. Please place an ROI first.")
             return
 
-        # 1) Finalize the bounding box from the current image (downsample dimension).
         coordsDown = self.computeBboxFromROI()
         if not coordsDown:
             slicer.util.warningDisplay("Unable to compute bounding box from ROI.")
@@ -1460,10 +1460,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.finalizeAllMaskButton.enabled = False
 
-        # Hide ROI from the scene
         self.removeRoiNode()
 
-        # 2) Collect the positive and negative points from the user
         negPointsFull = []
         numNeg = self.exclusionPointNode.GetNumberOfControlPoints()
         for i in range(numNeg):
@@ -1482,8 +1480,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             ptFull = self.downPointToFullPoint(ijk, self.currentSet, self.currentImageIndex)
             posPointsFull.append(ptFull)
 
-        # 3) Now proceed to mask all images in the set with that bounding box
-        #    and these sets of points
         n = len(self.imagePaths)
 
         self.maskAllProgressBar.setVisible(True)
@@ -1536,7 +1532,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
 
-        # 4) Re-enable normal UI
         self.restoreButtonStates()
 
         self.finalizingROI = False
@@ -1550,10 +1545,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 dnode.SetHandlesInteractive(False)
             slicer.mrmlScene.RemoveNode(self.boundingBoxRoiNode)
             self.boundingBoxRoiNode = None
-
-    #
-    # ----------------------------------------------------------------------
-    #
 
     def maskSingleImage(self, index, bboxDown, posPointsFull, negPointsFull, resFactor=1.0):
         import numpy as np
@@ -1573,7 +1564,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 negPointsFull,
                 marker_outputs
             )
-
         else:
             # Downsample approach
             H, W, _ = colorArrFull.shape
@@ -1636,7 +1626,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         colorPngFilename = baseName + ".jpg"
         colorPngPath = os.path.join(setOutputFolder, colorPngFilename)
 
-        from PIL import Image
         colorPil = Image.fromarray(cpy.astype(np.uint8))
         if exif_bytes:
             colorPil.save(colorPngPath, "jpeg", quality=100, exif=exif_bytes)
@@ -1664,7 +1653,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     #
     def onPlaceBoundingBoxClicked(self):
         self.storeCurrentButtonStates()
-        # If user is in the global mask flow, we don't want to do the single bounding box logic.
         if self.globalMaskAllInProgress:
             slicer.util.warningDisplay("You are in 'Mask All Images' mode. Please finalize or cancel that first.")
             self.restoreButtonStates()
@@ -1679,7 +1667,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         if s == "masked":
             if slicer.util.confirmYesNoDisplay(
-                    "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
+                "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
             ):
                 self.removeMaskFromCurrentImage()
                 self.startPlacingROI()
@@ -1687,7 +1675,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 self.restoreButtonStates()
         elif s == "bbox":
             if slicer.util.confirmYesNoDisplay(
-                    "A bounding box already exists. Creating a new one will remove it. Proceed?"
+                "A bounding box already exists. Creating a new one will remove it. Proceed?"
             ):
                 self.removeBboxFromCurrentImage()
                 self.startPlacingROI()
@@ -1898,8 +1886,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         def ijkToRas(i, j):
             p = [i, j, 0, 1]
-            # Note: we want the inverse transformation here, because we have
-            # RAS->IJK matrix. We need IJK->RAS. So let's invert that matrix:
             invMat = vtk.vtkMatrix4x4()
             invMat.DeepCopy(ijkToRasMat)
             invMat.Invert()
@@ -2239,11 +2225,11 @@ class SlicerWebODMManager:
 
             # Print output to Python console
             for line in process.stdout:
-                logging.info(line.strip())  # Print to console
-                print(line.strip())  # Print to Python console in Slicer
+                logging.info(line.strip())  # to Slicer console
+                print(line.strip())         # to Python console
             for line in process.stderr:
                 logging.error(line.strip())
-                print(line.strip())  # Print error messages to Python console
+                print(line.strip())
 
             return_code = process.wait()
             if return_code == 0:
@@ -2352,16 +2338,36 @@ class SlicerWebODMManager:
         else:
             slicer.util.infoDisplay("No combined_gcp_list.txt found. Proceeding without GCP...")
 
+        # 1) Start with baseline parameters
         params = dict(self.widget.baselineParams)
+
+        # 2) Gather user-chosen combos for each factor in factorLevels
         for factorName, combo in self.widget.factorComboBoxes.items():
             chosen_str = combo.currentText
+            # Convert booleans for certain combos
             if factorName == "ignore-gsd":
                 params["ignore-gsd"] = (chosen_str.lower() == "true")
+            elif factorName == "optimize-disk-space":
+                params["optimize-disk-space"] = (chosen_str.lower() == "true")
+            elif factorName == "no-gpu":
+                params["no-gpu"] = (chosen_str.lower() == "true")
             else:
+                # Attempt to convert numeric
                 try:
-                    params[factorName] = int(chosen_str)
-                except:
+                    val_int = int(chosen_str)
+                    params[factorName] = val_int
+                except ValueError:
+                    # Keep string
                     params[factorName] = chosen_str
+
+        # 3) max-concurrency from QSpinBox
+        params["max-concurrency"] = self.widget.maxConcurrencySpinBox.value
+
+        # 4) name from QLineEdit
+        dataset_name = self.widget.datasetNameLineEdit.text.strip()
+        if not dataset_name:
+            dataset_name = "SlicerReconstruction"
+        params["name"] = dataset_name
 
         shortTaskName = self.widget.generateShortTaskName("SlicerReconstruction", params)
         slicer.util.infoDisplay("Creating WebODM Task (non-blocking). Upload may take time...")
