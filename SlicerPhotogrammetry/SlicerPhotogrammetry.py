@@ -28,6 +28,25 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
         # Suppress VTK warnings globally
         vtk.vtkObject.GlobalWarningDisplayOff()
 
+        slicer.photogrammetryLO = """
+        <layout type="horizontal" split="true">
+          <item>
+            <view class="vtkMRMLSliceNode" singletontag="Red">
+              <property name="orientation" action="default">Axial</property>
+              <property name="viewlabel" action="default">R</property>
+              <property name="viewcolor" action="default">#F34A33</property>
+            </view>
+          </item>
+          <item>
+            <view class="vtkMRMLSliceNode" singletontag="Red2">
+              <property name="orientation" action="default">Axial</property>
+              <property name="viewlabel" action="default">R2</property>
+              <property name="viewcolor" action="default">#F34A33</property>
+            </view>
+          </item>
+        </layout>
+        """
+
 
 class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
     """
@@ -39,10 +58,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Creating _mask.png for webODM,
      - Creating single combined GCP file for all sets,
      - Non-blocking WebODM tasks (using pyodm),
-     - Checking/Installing/Re-launching WebODM on port 3002 with GPU support.
-     - Inclusion/Exclusion point marking for SAM.
-     - NEW: A "Mask All Images In Set" workflow that removes existing masks,
-       lets you place an ROI bounding box for the entire set, then finalize for all.
+     - Checking/Installing/Re-launching WebODM on port 3002 with GPU support (now simplified to two buttons),
+     - Inclusion/Exclusion point marking for SAM,
+     - A "Mask All Images In Set" workflow that removes existing masks,
+       lets you place an ROI bounding box for the entire set, then finalize for all,
+     - Importing a completed WebODM model as an OBJ and switching to a 3D layout.
     """
 
     def __init__(self, parent=None):
@@ -113,13 +133,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # "Clone Find-GCP" button
         self.cloneFindGCPButton = None
 
-        # WebODM
+        # WebODM: simplified to two main buttons plus extra UI
         self.nodeIPLineEdit = None
         self.nodePortSpinBox = None
         self.launchWebODMTaskButton = None
         self.webodmLogTextEdit = None
         self.stopMonitoringButton = None
         self.lastWebODMOutputLineIndex = 0
+
+        # Replaces older "Check/Install/Relaunch" with new "Launch" + "Stop Node"
+        self.launchWebODMButton = None
+        self.stopWebODMButton = None
+
+        # Button to import WebODM model (OBJ) into Slicer as a 3D model
+        self.importModelButton = None
 
         # ------------------
         # 1) Baseline params (some remain constant, others were removed to vary)
@@ -139,20 +166,20 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.factorLevels = {
             # Original factor levels
             "ignore-gsd": [False, True],
-            "matcher-neighbors": [0, 8, 12, 16, 24],
+            "matcher-neighbors": [16, 0, 8, 12, 24],
             "mesh-octree-depth": [12, 13, 14],
             "mesh-size": [300000, 500000, 750000, 1000000],
-            "min-num-features": [10000, 20000, 50000],
-            "pc-filter": [3, 2, 1, 4, 5],
-            "depthmap-resolution": [2048, 3072, 4096, 8192],
+            "min-num-features": [50000, 10000, 20000],
+            "pc-filter": [1, 2, 3, 4, 5],
+            "depthmap-resolution": [3072, 2048, 4096, 8192],
 
             # New factor-level parameters requested
-            "matcher-type": ["bow", "bruteforce", "flann"],
-            "feature-type": ["akaze", "dspsift", "hahog", "orb", "sift"],
-            "feature-quality": ["medium", "high", "ultra"],
-            "pc-quality": ["medium", "high", "ultra"],
-            "optimize-disk-space": [False, True],
-            "rerun": ["dataset", "split", "merge", "opensfm", "openmvs"],
+            "matcher-type": ["bruteforce", "bow", "flann"],
+            "feature-type": ["dspsift", "akaze", "hahog", "orb", "sift"],
+            "feature-quality": ["ultra", "medium", "high"],
+            "pc-quality": ["high", "medium", "ultra"],
+            "optimize-disk-space": [True, False],
+            "rerun": ["openmvs", "dataset", "split", "merge", "opensfm"],
             "no-gpu": [False, True],
         }
         self.factorComboBoxes = {}
@@ -164,15 +191,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.datasetNameLineEdit = None
 
         self.maskedCountLabel = None
+
+        # We register a new custom layout ID
         self.layoutId = 1003
 
         # WebODM installation
-        self.webODMCheckStatusButton = None
-        self.webODMInstallButton = None
-        self.webODMRelaunchButton = None
-        self.webODMLocalFolder = None
-
+        # (Old references replaced by two new buttons, but we keep logic in SlicerWebODMManager)
         self.webODMManager = None
+        self.webODMLocalFolder = None
 
         # We store references to 3 radio buttons for resolution
         self.radioFull = None
@@ -197,13 +223,25 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.globalMaskAllInProgress = False
 
     def setup(self):
+        """
+        Sets up the module GUI and logic, including:
+
+        - Model loading UI
+        - Image set processing UI
+        - Masking controls
+        - WebODM management & launching
+        - Factor combos for WebODM tasks
+        - GCP generation
+        - Import model button (new)
+        """
+
         ScriptedLoadableModuleWidget.setup(self)
         self.load_dependencies()
         self.logic = SlicerPhotogrammetryLogic()
 
         self.setupLogger()
         self.layout.setAlignment(qt.Qt.AlignTop)
-        self.createCustomLayout()
+        self.createCustomLayout()  # Register and create our layout
 
         #
         # Create a QTabWidget to hold two tabs
@@ -247,7 +285,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         savedMasterFolder = slicer.app.settings().value("SlicerPhotogrammetry/masterFolderPath", "")
         if os.path.isdir(savedMasterFolder):
             self.masterFolderSelector.directory = savedMasterFolder
-        parametersFormLayout.addRow("Master Folder:", self.masterFolderSelector)
+        parametersFormLayout.addRow("Input Folder:", self.masterFolderSelector)
 
         self.outputFolderSelector = ctk.ctkDirectoryButton()
         savedOutputFolder = slicer.app.settings().value("SlicerPhotogrammetry/outputFolderPath", "")
@@ -392,14 +430,14 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         tab2Layout.addWidget(manageWODMCollapsibleButton)
         manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsibleButton)
 
-        self.webODMCheckStatusButton = qt.QPushButton("Check WebODM Status on port 3002")
-        manageWODMFormLayout.addWidget(self.webODMCheckStatusButton)
+        # Replacing the old three buttons with two new ones:
+        buttonRow = qt.QHBoxLayout()
+        self.launchWebODMButton = qt.QPushButton("Launch WebODM")
+        self.stopWebODMButton = qt.QPushButton("Stop Node")
 
-        self.webODMInstallButton = qt.QPushButton("Install/Reinstall WebODM (GPU)")
-        manageWODMFormLayout.addWidget(self.webODMInstallButton)
-
-        self.webODMRelaunchButton = qt.QPushButton("Relaunch WebODM on Port 3002")
-        manageWODMFormLayout.addWidget(self.webODMRelaunchButton)
+        buttonRow.addWidget(self.launchWebODMButton)
+        buttonRow.addWidget(self.stopWebODMButton)
+        manageWODMFormLayout.addRow(buttonRow)
 
         #
         # (C) Find-GCP Collapsible
@@ -486,6 +524,10 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton.setEnabled(False)
         webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
 
+        # A button at the bottom to import model
+        self.importModelButton = qt.QPushButton("Import WebODM Model")
+        tab2Layout.addWidget(self.importModelButton)
+
         tab2Layout.addStretch(1)
 
         self.createMasterNodes()
@@ -497,14 +539,21 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.ensure_webodm_folder_permissions()
 
         self.webODMManager = SlicerWebODMManager(widget=self)
-        self.webODMCheckStatusButton.connect('clicked(bool)', self.webODMManager.onCheckWebODMStatusClicked)
-        self.webODMInstallButton.connect('clicked(bool)', self.webODMManager.onInstallWebODMClicked)
-        self.webODMRelaunchButton.connect('clicked(bool)', self.webODMManager.onRelaunchWebODMClicked)
+        # Connect new simplified button signals
+        self.launchWebODMButton.connect('clicked(bool)', self.webODMManager.onLaunchWebODMClicked)
+        self.stopWebODMButton.connect('clicked(bool)', self.webODMManager.onStopNodeClicked)
         self.stopMonitoringButton.connect('clicked(bool)', self.webODMManager.onStopMonitoring)
+
+        # Connect import model button
+        self.importModelButton.connect('clicked(bool)', self.webODMManager.onImportModelClicked)
 
         # Initialize Markups nodes for Inclusions and Exclusions
         self.initializeInclusionMarkupsNode()
         self.initializeExclusionMarkupsNode()
+
+        self.addLayoutButton(self.layoutId, "Double Red Viewport",
+                             "Custom Layout for Photogrammetry Module",
+                             "red_squared_lo_icon.jpg", slicer.photogrammetryLO)
 
     def ensure_webodm_folder_permissions(self):
         """
@@ -517,198 +566,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             logging.info(f"WebODM folder created and permissions set: {self.webODMLocalFolder}")
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to create or set permissions for WebODM folder:\n{str(e)}")
-
-    #
-    # ---------------------------
-    # CHANGES BELOW: Markups Nodes for Inclusion and Exclusion
-    # ---------------------------
-    #
-    def initializeExclusionMarkupsNode(self):
-        """Create (or retrieve) a single MarkupsFiducialNode used for all exclusion points (red)."""
-        existingNode = slicer.mrmlScene.GetFirstNodeByName("ExclusionPoints")
-        if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
-            self.exclusionPointNode = existingNode
-        else:
-            self.exclusionPointNode = slicer.mrmlScene.AddNewNodeByClass(
-                "vtkMRMLMarkupsFiducialNode", "ExclusionPoints"
-            )
-            self.exclusionPointNode.CreateDefaultDisplayNodes()
-
-        # Make them red
-        if self.exclusionPointNode.GetDisplayNode():
-            self.exclusionPointNode.GetDisplayNode().SetSelectedColor(1, 0, 0)  # red
-            self.exclusionPointNode.GetDisplayNode().SetColor(1, 0, 0)
-
-        self.exclusionPointNode.SetMaximumNumberOfControlPoints(-1)
-
-        if not self.exclusionPointAddedObserverTag:
-            self.exclusionPointAddedObserverTag = self.exclusionPointNode.AddObserver(
-                slicer.vtkMRMLMarkupsNode.PointAddedEvent, self.onExclusionPointAdded
-            )
-
-    def initializeInclusionMarkupsNode(self):
-        """Create (or retrieve) a single MarkupsFiducialNode used for all inclusion points (green)."""
-        existingNode = slicer.mrmlScene.GetFirstNodeByName("InclusionPoints")
-        if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
-            self.inclusionPointNode = existingNode
-        else:
-            self.inclusionPointNode = slicer.mrmlScene.AddNewNodeByClass(
-                "vtkMRMLMarkupsFiducialNode", "InclusionPoints"
-            )
-            self.inclusionPointNode.CreateDefaultDisplayNodes()
-
-        # Make them green
-        if self.inclusionPointNode.GetDisplayNode():
-            self.inclusionPointNode.GetDisplayNode().SetSelectedColor(0, 1, 0)
-            self.inclusionPointNode.GetDisplayNode().SetColor(0, 1, 0)
-
-        self.inclusionPointNode.SetMaximumNumberOfControlPoints(-1)
-
-        if not self.inclusionPointAddedObserverTag:
-            self.inclusionPointAddedObserverTag = self.inclusionPointNode.AddObserver(
-                slicer.vtkMRMLMarkupsNode.PointAddedEvent, self.onInclusionPointAdded
-            )
-
-    def onExclusionPointAdded(self, caller, event):
-        """
-        Debug callback each time a new exclusion point is placed.
-        """
-        numPoints = caller.GetNumberOfControlPoints()
-        logging.info(f"[ExclusionPoints Debug] A new point was added. Current total = {numPoints}.")
-
-    def onInclusionPointAdded(self, caller, event):
-        """
-        Debug callback each time a new inclusion point is placed.
-        """
-        numPoints = caller.GetNumberOfControlPoints()
-        logging.info(f"[InclusionPoints Debug] A new point was added. Current total = {numPoints}.")
-
-    #
-    # End Markups changes
-    # ---------------------------
-    #
-
-    def onAddInclusionPointsClicked(self):
-        """Enter place mode for the inclusion Markups node. We disable the Exclusion button while active."""
-        logging.info("[InclusionPoints Debug] Entering multi-point place mode (inclusion).")
-
-        # Stop if already in place mode for something else
-        self.stopAnyActivePlacement()
-
-        # Set up place mode for inclusion node
-        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-
-        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
-        selectionNode.SetActivePlaceNodeID(self.inclusionPointNode.GetID())
-
-        interactionNode.SetPlaceModePersistence(1)
-        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
-
-        # Now manage button states
-        self.addExclusionPointsButton.enabled = False
-        self.stopAddingPointsButton.enabled = True
-        self.addInclusionPointsButton.enabled = False
-
-    def onAddExclusionPointsClicked(self):
-        """Enter place mode for the exclusion Markups node. We disable the Inclusion button while active."""
-        logging.info("[ExclusionPoints Debug] Entering multi-point place mode (exclusion).")
-
-        # Stop if already in place mode for something else
-        self.stopAnyActivePlacement()
-
-        # Set up place mode for exclusion node
-        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-
-        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
-        selectionNode.SetActivePlaceNodeID(self.exclusionPointNode.GetID())
-
-        interactionNode.SetPlaceModePersistence(1)
-        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
-
-        # Now manage button states
-        self.addInclusionPointsButton.enabled = False
-        self.stopAddingPointsButton.enabled = True
-        self.addExclusionPointsButton.enabled = False
-
-    def onStopAddingPointsClicked(self):
-        """Stop place mode, restoring normal usage. Both 'Add Inclusion' and 'Add Exclusion' become enabled."""
-        logging.info("[Points Debug] Stopping any place mode for inclusion/exclusion points.")
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        interactionNode.SetPlaceModePersistence(0)
-        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
-        # Re-enable both "Add Inclusion" and "Add Exclusion"
-        self.addInclusionPointsButton.enabled = True
-        self.addExclusionPointsButton.enabled = True
-        self.stopAddingPointsButton.enabled = False
-
-    def onClearPointsClicked(self):
-        """
-        Prompt the user: Clear Exclusion? Clear Inclusion? or Clear Both? or Cancel.
-        Then do the appropriate clearing.
-        """
-        if not self.exclusionPointNode and not self.inclusionPointNode:
-            return
-
-        msgBox = qt.QMessageBox()
-        msgBox.setWindowTitle("Clear Points")
-        msgBox.setText("Choose which points you wish to clear:")
-        clearExclButton = msgBox.addButton("Exclusion Only", qt.QMessageBox.ActionRole)
-        clearInclButton = msgBox.addButton("Inclusion Only", qt.QMessageBox.ActionRole)
-        clearBothButton = msgBox.addButton("Both", qt.QMessageBox.ActionRole)
-        cancelButton = msgBox.addButton("Cancel", qt.QMessageBox.RejectRole)
-
-        msgBox.exec_()
-
-        clickedButton = msgBox.clickedButton()
-        if clickedButton == cancelButton:
-            logging.info("Clear points canceled by user.")
-            return
-        elif clickedButton == clearExclButton:
-            self.exclusionPointNode.RemoveAllControlPoints()
-            logging.info("Cleared all Exclusion points.")
-        elif clickedButton == clearInclButton:
-            self.inclusionPointNode.RemoveAllControlPoints()
-            logging.info("Cleared all Inclusion points.")
-        elif clickedButton == clearBothButton:
-            self.exclusionPointNode.RemoveAllControlPoints()
-            self.inclusionPointNode.RemoveAllControlPoints()
-            logging.info("Cleared all Exclusion and Inclusion points.")
-
-    def stopAnyActivePlacement(self):
-        """
-        If either inclusion or exclusion is in place mode, stop it.
-        """
-        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
-        if interactionNode.GetCurrentInteractionMode() == interactionNode.Place:
-            interactionNode.SetPlaceModePersistence(0)
-            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
-
-    def updatePointButtons(self):
-        """
-        Called whenever we want to refresh the state of the Inclusion/Exclusion buttons
-        based on whether the current image is in 'bbox' or not.
-        """
-        st = self.imageStates[self.currentImageIndex]["state"]
-        if st == "bbox":
-            self.addInclusionPointsButton.enabled = True
-            self.addExclusionPointsButton.enabled = True
-            self.clearPointsButton.enabled = True
-        else:
-            self.addInclusionPointsButton.enabled = False
-            self.addExclusionPointsButton.enabled = False
-            self.clearPointsButton.enabled = False
-            self.stopAddingPointsButton.enabled = False
-
-    def getUserSelectedResolutionFactor(self):
-        if self.radioHalf.isChecked():
-            return 0.5
-        elif self.radioQuarter.isChecked():
-            return 0.25
-        else:
-            return 1.0
 
     def load_dependencies(self):
         """
@@ -781,28 +638,37 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         from segment_anything import sam_model_registry, SamPredictor
 
     def createCustomLayout(self):
-        customLayout = """
-        <layout type="horizontal" split="true">
-          <item>
-            <view class="vtkMRMLSliceNode" singletontag="Red">
-              <property name="orientation" action="default">Axial</property>
-              <property name="viewlabel" action="default">R</property>
-              <property name="viewcolor" action="default">#F34A33</property>
-            </view>
-          </item>
-          <item>
-            <view class="vtkMRMLSliceNode" singletontag="Red2">
-              <property name="orientation" action="default">Axial</property>
-              <property name="viewlabel" action="default">R2</property>
-              <property name="viewcolor" action="default">#F34A33</property>
-            </view>
-          </item>
-        </layout>
         """
-        layoutMgr = slicer.app.layoutManager()
-        layoutNode = layoutMgr.layoutLogic().GetLayoutNode()
-        layoutNode.AddLayoutDescription(self.layoutId, customLayout)
-        layoutMgr.setLayout(self.layoutId)
+        Register a new custom layout that includes side-by-side Red and Red2 slices.
+        Also make it available in the Slicer layout selector.
+        """
+
+        if not slicer.app.layoutManager().layoutLogic().GetLayoutNode().SetLayoutDescription(self.layoutId,
+                                                                                             slicer.photogrammetryLO):
+            slicer.app.layoutManager().layoutLogic().GetLayoutNode().AddLayoutDescription(self.layoutId,
+                                                                                          slicer.photogrammetryLO)
+
+        slicer.app.layoutManager().setLayout(self.layoutId)
+
+    def addLayoutButton(self, layoutID, buttonAction, toolTip, imageFileName, layoutDiscription):
+        layoutManager = slicer.app.layoutManager()
+        layoutManager.layoutLogic().GetLayoutNode().AddLayoutDescription(layoutID, layoutDiscription)
+
+        viewToolBar = slicer.util.mainWindow().findChild('QToolBar', 'ViewToolBar')
+        layoutMenu = viewToolBar.widgetForAction(viewToolBar.actions()[0]).menu()
+        layoutSwitchActionParent = layoutMenu
+        # use `layoutMenu` to add inside layout list, use `viewToolBar` to add next the standard layout list
+        layoutSwitchAction = layoutSwitchActionParent.addAction(buttonAction)  # add inside layout list
+
+        moduleDir = os.path.dirname(slicer.util.modulePath(self.__module__))
+        iconPath = os.path.join(moduleDir, 'Resources/Icons', imageFileName)
+        layoutSwitchAction.setIcon(qt.QIcon(iconPath))
+        layoutSwitchAction.setToolTip(toolTip)
+        layoutSwitchAction.connect('triggered()',
+                                   lambda layoutId=layoutID: slicer.app.layoutManager().setLayout(layoutId))
+        layoutSwitchAction.setData(layoutID)
+
+    # Setup Analysis callbacks and helpers
 
     def setupLogger(self):
         class VTKLogFilter(logging.Filter):
@@ -1168,8 +1034,9 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
     def enableMaskAllImagesIfPossible(self):
         # Original logic: always enable "Mask All" if any image has 'bbox' or 'masked'.
-        # For simplicity, we can just enable it unconditionally as in the original code.
-        self.maskAllImagesButton.enabled = True
+        # We'll just enable it unconditionally if there's a set loaded.
+        if self.currentSet:
+            self.maskAllImagesButton.enabled = True
 
     def showOriginalOnly(self):
         lm = slicer.app.layoutManager()
@@ -1648,9 +1515,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         if maskCacheKeyDown in self.imageCache:
             del self.imageCache[maskCacheKeyDown]
 
-    #
-    # Single bounding box logic
-    #
     def onPlaceBoundingBoxClicked(self):
         self.storeCurrentButtonStates()
         if self.globalMaskAllInProgress:
@@ -1667,7 +1531,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         if s == "masked":
             if slicer.util.confirmYesNoDisplay(
-                "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
+                    "This image is already masked. Creating a new bounding box will remove the existing mask. Proceed?"
             ):
                 self.removeMaskFromCurrentImage()
                 self.startPlacingROI()
@@ -1675,7 +1539,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 self.restoreButtonStates()
         elif s == "bbox":
             if slicer.util.confirmYesNoDisplay(
-                "A bounding box already exists. Creating a new one will remove it. Proceed?"
+                    "A bounding box already exists. Creating a new one will remove it. Proceed?"
             ):
                 self.removeBboxFromCurrentImage()
                 self.startPlacingROI()
@@ -2154,16 +2018,206 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.vtkLogFilter = None
             self.logger = None
 
+    #
+    # ---------------------------
+    # Inclusion/Exclusion Markups
+    # ---------------------------
+    #
+    def initializeExclusionMarkupsNode(self):
+        """Create (or retrieve) a single MarkupsFiducialNode used for all exclusion points (red)."""
+        existingNode = slicer.mrmlScene.GetFirstNodeByName("ExclusionPoints")
+        if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
+            self.exclusionPointNode = existingNode
+        else:
+            self.exclusionPointNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode", "ExclusionPoints"
+            )
+            self.exclusionPointNode.CreateDefaultDisplayNodes()
+
+        # Make them red
+        if self.exclusionPointNode.GetDisplayNode():
+            self.exclusionPointNode.GetDisplayNode().SetSelectedColor(1, 0, 0)  # red
+            self.exclusionPointNode.GetDisplayNode().SetColor(1, 0, 0)
+
+        self.exclusionPointNode.SetMaximumNumberOfControlPoints(-1)
+
+        if not self.exclusionPointAddedObserverTag:
+            self.exclusionPointAddedObserverTag = self.exclusionPointNode.AddObserver(
+                slicer.vtkMRMLMarkupsNode.PointAddedEvent, self.onExclusionPointAdded
+            )
+
+    def initializeInclusionMarkupsNode(self):
+        """Create (or retrieve) a single MarkupsFiducialNode used for all inclusion points (green)."""
+        existingNode = slicer.mrmlScene.GetFirstNodeByName("InclusionPoints")
+        if existingNode and existingNode.IsA("vtkMRMLMarkupsFiducialNode"):
+            self.inclusionPointNode = existingNode
+        else:
+            self.inclusionPointNode = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode", "InclusionPoints"
+            )
+            self.inclusionPointNode.CreateDefaultDisplayNodes()
+
+        # Make them green
+        if self.inclusionPointNode.GetDisplayNode():
+            self.inclusionPointNode.GetDisplayNode().SetSelectedColor(0, 1, 0)
+            self.inclusionPointNode.GetDisplayNode().SetColor(0, 1, 0)
+
+        self.inclusionPointNode.SetMaximumNumberOfControlPoints(-1)
+
+        if not self.inclusionPointAddedObserverTag:
+            self.inclusionPointAddedObserverTag = self.inclusionPointNode.AddObserver(
+                slicer.vtkMRMLMarkupsNode.PointAddedEvent, self.onInclusionPointAdded
+            )
+
+    def onExclusionPointAdded(self, caller, event):
+        """
+        Debug callback each time a new exclusion point is placed.
+        """
+        numPoints = caller.GetNumberOfControlPoints()
+        logging.info(f"[ExclusionPoints Debug] A new point was added. Current total = {numPoints}.")
+
+    def onInclusionPointAdded(self, caller, event):
+        """
+        Debug callback each time a new inclusion point is placed.
+        """
+        numPoints = caller.GetNumberOfControlPoints()
+        logging.info(f"[InclusionPoints Debug] A new point was added. Current total = {numPoints}.")
+
+    def onAddInclusionPointsClicked(self):
+        """Enter place mode for the inclusion Markups node. We disable the Exclusion button while active."""
+        logging.info("[InclusionPoints Debug] Entering multi-point place mode (inclusion).")
+
+        # Stop if already in place mode for something else
+        self.stopAnyActivePlacement()
+
+        # Set up place mode for inclusion node
+        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
+        selectionNode.SetActivePlaceNodeID(self.inclusionPointNode.GetID())
+
+        interactionNode.SetPlaceModePersistence(1)
+        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
+        # Now manage button states
+        self.addExclusionPointsButton.enabled = False
+        self.stopAddingPointsButton.enabled = True
+        self.addInclusionPointsButton.enabled = False
+
+    def onAddExclusionPointsClicked(self):
+        """Enter place mode for the exclusion Markups node. We disable the Inclusion button while active."""
+        logging.info("[ExclusionPoints Debug] Entering multi-point place mode (exclusion).")
+
+        # Stop if already in place mode for something else
+        self.stopAnyActivePlacement()
+
+        # Set up place mode for exclusion node
+        selectionNode = slicer.mrmlScene.GetNodeByID("vtkMRMLSelectionNodeSingleton")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+
+        selectionNode.SetReferenceActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
+        selectionNode.SetActivePlaceNodeID(self.exclusionPointNode.GetID())
+
+        interactionNode.SetPlaceModePersistence(1)
+        interactionNode.SetCurrentInteractionMode(interactionNode.Place)
+
+        # Now manage button states
+        self.addInclusionPointsButton.enabled = False
+        self.stopAddingPointsButton.enabled = True
+        self.addExclusionPointsButton.enabled = False
+
+    def onStopAddingPointsClicked(self):
+        """Stop place mode, restoring normal usage. Both 'Add Inclusion' and 'Add Exclusion' become enabled."""
+        logging.info("[Points Debug] Stopping any place mode for inclusion/exclusion points.")
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetPlaceModePersistence(0)
+        interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+
+        # Re-enable both "Add Inclusion" and "Add Exclusion"
+        self.addInclusionPointsButton.enabled = True
+        self.addExclusionPointsButton.enabled = True
+        self.stopAddingPointsButton.enabled = False
+
+    def onClearPointsClicked(self):
+        """
+        Prompt the user: Clear Exclusion? Clear Inclusion? or Clear Both? or Cancel.
+        Then do the appropriate clearing.
+        """
+        if not self.exclusionPointNode and not self.inclusionPointNode:
+            return
+
+        msgBox = qt.QMessageBox()
+        msgBox.setWindowTitle("Clear Points")
+        msgBox.setText("Choose which points you wish to clear:")
+        clearExclButton = msgBox.addButton("Exclusion Only", qt.QMessageBox.ActionRole)
+        clearInclButton = msgBox.addButton("Inclusion Only", qt.QMessageBox.ActionRole)
+        clearBothButton = msgBox.addButton("Both", qt.QMessageBox.ActionRole)
+        cancelButton = msgBox.addButton("Cancel", qt.QMessageBox.RejectRole)
+
+        msgBox.exec_()
+
+        clickedButton = msgBox.clickedButton()
+        if clickedButton == cancelButton:
+            logging.info("Clear points canceled by user.")
+            return
+        elif clickedButton == clearExclButton:
+            self.exclusionPointNode.RemoveAllControlPoints()
+            logging.info("Cleared all Exclusion points.")
+        elif clickedButton == clearInclButton:
+            self.inclusionPointNode.RemoveAllControlPoints()
+            logging.info("Cleared all Inclusion points.")
+        elif clickedButton == clearBothButton:
+            self.exclusionPointNode.RemoveAllControlPoints()
+            self.inclusionPointNode.RemoveAllControlPoints()
+            logging.info("Cleared all Exclusion and Inclusion points.")
+
+    def stopAnyActivePlacement(self):
+        """
+        If either inclusion or exclusion is in place mode, stop it.
+        """
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        if interactionNode.GetCurrentInteractionMode() == interactionNode.Place:
+            interactionNode.SetPlaceModePersistence(0)
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+
+    def updatePointButtons(self):
+        """
+        Called whenever we want to refresh the state of the Inclusion/Exclusion buttons
+        based on whether the current image is in 'bbox' or not.
+        """
+        st = self.imageStates[self.currentImageIndex]["state"]
+        if st == "bbox":
+            self.addInclusionPointsButton.enabled = True
+            self.addExclusionPointsButton.enabled = True
+            self.clearPointsButton.enabled = True
+        else:
+            self.addInclusionPointsButton.enabled = False
+            self.addExclusionPointsButton.enabled = False
+            self.clearPointsButton.enabled = False
+            self.stopAddingPointsButton.enabled = False
+
+    def getUserSelectedResolutionFactor(self):
+        if self.radioHalf.isChecked():
+            return 0.5
+        elif self.radioQuarter.isChecked():
+            return 0.25
+        else:
+            return 1.0
+
 
 class SlicerWebODMManager:
     """
     New manager class dedicated to WebODM-related functionality:
      - Checking Docker / WebODM status
      - Installing / Re-installing WebODM
-     - Relaunching a container with GPU support
+     - (Now unified) Launching a container with GPU support on port 3002
+       (will pull if needed, stop any existing container, etc.)
+     - Stopping a running node if desired
      - Creating / monitoring a pyodm Task
      - Downloading results on completion
      - Stopping task monitoring
+     - Importing the completed model into Slicer
     """
 
     def __init__(self, widget):
@@ -2173,7 +2227,14 @@ class SlicerWebODMManager:
         self.webodmTimer = None
         self.lastWebODMOutputLineIndex = 0
 
-    def onCheckWebODMStatusClicked(self):
+    # ------------------------------------------------------------------
+    # DEPRECATED (not connected to UI) but retained to preserve old code
+    # ------------------------------------------------------------------
+    def onCheckWebODMStatusClicked_DEPRECATED(self):
+        """
+        Deprecated method for checking WebODM status on port 3002.
+        Retained for reference; not called by the UI anymore.
+        """
         try:
             subprocess.run(["docker", "--version"], check=True, capture_output=True)
         except Exception as e:
@@ -2196,7 +2257,11 @@ class SlicerWebODMManager:
         except Exception:
             slicer.util.infoDisplay("No WebODM node found on port 3002. You can install/launch below.")
 
-    def onInstallWebODMClicked(self):
+    def onInstallWebODMClicked_DEPRECATED(self):
+        """
+        Deprecated method for installing WebODM.
+        Retained for reference; not called by the UI anymore.
+        """
         localFolder = self.widget.webODMLocalFolder
         if os.path.isdir(localFolder):
             msg = (
@@ -2226,7 +2291,7 @@ class SlicerWebODMManager:
             # Print output to Python console
             for line in process.stdout:
                 logging.info(line.strip())  # to Slicer console
-                print(line.strip())         # to Python console
+                print(line.strip())  # to Python console
             for line in process.stderr:
                 logging.error(line.strip())
                 print(line.strip())
@@ -2256,7 +2321,11 @@ class SlicerWebODMManager:
         except Exception as e:
             slicer.util.errorDisplay(f"Docker pull failed: {str(e)}")
 
-    def onRelaunchWebODMClicked(self):
+    def onRelaunchWebODMClicked_DEPRECATED(self):
+        """
+        Deprecated method for forcibly stopping any node on 3002 and launching a new nodeodm:gpu container.
+        Retained for reference; not called by the UI anymore.
+        """
         try:
             result = subprocess.run(
                 ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
@@ -2294,6 +2363,135 @@ class SlicerWebODMManager:
             slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", "3002")
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
+
+    # ------------------------------------------------------------------
+    # New, combined approach for "Launch WebODM"
+    # ------------------------------------------------------------------
+    def onLaunchWebODMClicked(self):
+        """
+        Single entry point to:
+         1) Ask user for confirmation
+         2) Check if nodeodm:gpu is installed (pull if not)
+         3) Stop any existing container on port 3002
+         4) Launch a new container on port 3002
+         5) Set node IP & port in UI
+        """
+
+        proceed = slicer.util.confirmYesNoDisplay(
+            "This action will ensure nodeodm:gpu is installed (pull if needed), "
+            "stop any running container on port 3002, and launch a new one.\n\n"
+            "Proceed?"
+        )
+        if not proceed:
+            slicer.util.infoDisplay("Launch WebODM canceled by user.")
+            return
+
+        # 1) Check Docker presence
+        try:
+            subprocess.run(["docker", "--version"], check=True, capture_output=True)
+        except Exception as e:
+            slicer.util.warningDisplay(f"Docker not found or not in PATH.\nError: {str(e)}")
+            return
+
+        # 2) Check if nodeodm:gpu is installed
+        try:
+            check_process = subprocess.run(
+                ["docker", "images", "-q", "opendronemap/nodeodm:gpu"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            image_id = check_process.stdout.strip()
+            if not image_id:
+                # pull
+                slicer.util.infoDisplay("nodeodm:gpu not found, pulling latest (this may take a while).")
+                pull_process = subprocess.run(
+                    ["docker", "pull", "opendronemap/nodeodm:gpu"],
+                    text=True
+                )
+                if pull_process.returncode != 0:
+                    slicer.util.errorDisplay("Failed to pull nodeodm:gpu image. Check logs.")
+                    return
+                else:
+                    slicer.util.infoDisplay("Successfully pulled nodeodm:gpu.")
+        except subprocess.CalledProcessError as e:
+            slicer.util.errorDisplay(f"Error checking nodeodm:gpu status: {str(e)}")
+            return
+
+        # 3) Stop any container on port 3002
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
+                capture_output=True, text=True, check=True
+            )
+            container_ids = result.stdout.strip().split()
+            for cid in container_ids:
+                if cid:
+                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
+                    subprocess.run(["docker", "stop", cid], check=True)
+        except Exception as e:
+            slicer.util.warningDisplay(f"Error stopping old container(s): {str(e)}")
+
+        # 4) Launch a new container
+        local_folder = self.widget.webODMLocalFolder
+        if not os.path.isdir(local_folder):
+            slicer.util.infoDisplay("Creating local WebODM folder...")
+            os.makedirs(local_folder, exist_ok=True)
+
+        slicer.util.infoDisplay("Launching nodeodm:gpu container on port 3002...")
+        cmd = [
+            "docker", "run", "--rm", "-d",
+            "-p", "3002:3000",
+            "--gpus", "all",
+            "--name", "slicer-webodm-3002",
+            "-v", f"{local_folder}:/var/www/data",
+            "opendronemap/nodeodm:gpu"
+        ]
+        try:
+            subprocess.run(cmd, check=True)
+            slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
+            self.widget.nodeIPLineEdit.setText("127.0.0.1")
+            self.widget.nodePortSpinBox.setValue(3002)
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "127.0.0.1")
+            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", "3002")
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
+
+    def onStopNodeClicked(self):
+        """
+        Stop an existing node on port 3002 if present.
+        If there's a job in progress, ask user for confirmation.
+        """
+        # Check if a job is in progress
+        jobInProgress = (self.webodmTask is not None)
+
+        if jobInProgress:
+            proceed = slicer.util.confirmYesNoDisplay(
+                "A WebODM task appears to be in progress. Stopping the node now will cancel that task.\n\n"
+                "Do you want to continue?"
+            )
+            if not proceed:
+                slicer.util.infoDisplay("Stop Node canceled by user.")
+                return
+
+        # Stop any container on port 3002
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "publish=3002", "--format", "{{.ID}}"],
+                capture_output=True, text=True, check=True
+            )
+            container_ids = result.stdout.strip().split()
+            if not container_ids or not any(container_ids):
+                slicer.util.infoDisplay("No container currently running on port 3002.")
+                return
+
+            for cid in container_ids:
+                if cid:
+                    slicer.util.infoDisplay(f"Stopping container {cid} on port 3002...")
+                    subprocess.run(["docker", "stop", cid], check=True)
+            slicer.util.infoDisplay("Node successfully stopped.")
+        except Exception as e:
+            slicer.util.warningDisplay(f"Error stopping container(s): {str(e)}")
 
     def onRunWebODMTask(self):
         from pyodm import Node
@@ -2403,7 +2601,7 @@ class SlicerWebODMManager:
             self.webodmTimer.deleteLater()
             self.webodmTimer = None
         self.webodmTask = None
-        self.webodmOutDir = None
+        #self.webodmOutDir = None
         self.widget.stopMonitoringButton.setEnabled(False)
         self.widget.webodmLogTextEdit.append("Stopped monitoring.")
 
@@ -2444,7 +2642,7 @@ class SlicerWebODMManager:
                 self.webodmTimer.deleteLater()
                 self.webodmTimer = None
             self.webodmTask = None
-            self.webodmOutDir = None
+            #self.webodmOutDir = None
             self.widget.stopMonitoringButton.setEnabled(False)
         elif info.status.name.lower() in ["failed", "canceled"]:
             self.widget.webodmLogTextEdit.append("Task failed or canceled. Stopping.")
@@ -2454,8 +2652,34 @@ class SlicerWebODMManager:
                 self.webodmTimer.deleteLater()
                 self.webodmTimer = None
             self.webodmTask = None
-            self.webodmOutDir = None
+            #self.webodmOutDir = None
             self.widget.stopMonitoringButton.setEnabled(False)
+
+    def onImportModelClicked(self):
+        """
+        Imports the 'odm_textured_model_geo.obj' from the most recent output directory
+        into Slicer, then switches to a 3D-only layout.
+        """
+        if not self.webodmOutDir:
+            slicer.util.warningDisplay(
+                "No WebODM output directory found. Please run a WebODM reconstruction first."
+            )
+            return
+
+        objPath = os.path.join(self.webodmOutDir, "odm_texturing", "odm_textured_model_geo.obj")
+        if not os.path.isfile(objPath):
+            slicer.util.warningDisplay(
+                f"No model file found at:\n{objPath}\nMake sure the reconstruction completed successfully."
+            )
+            return
+
+        loadedNode = slicer.util.loadModel(objPath)
+        if loadedNode:
+            layoutMgr = slicer.app.layoutManager()
+            layoutMgr.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+            slicer.util.infoDisplay("Imported model and switched to 3D layout.")
+        else:
+            slicer.util.warningDisplay("Failed to load model. Check logs.")
 
 
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
