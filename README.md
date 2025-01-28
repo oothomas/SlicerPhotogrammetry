@@ -1,4 +1,4 @@
-# SlicerPhotogrammetry
+# Photogrammetry
 An extension to preprocess (masking) large collection photographs which then can be processed to construct 3D models with texture. 
 See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step up and optionally use Aruco markers to obtain physical scale of the object. 
 
@@ -7,9 +7,9 @@ Torch (will install the PyTorch extension, if not already installed).
 
 ## Sample Data
 
-# SlicerPhotogrammetry User Guide
+# Photogrammetry User Guide
 
-This document will guide you through the **SlicerPhotogrammetry** module's features, from loading models and preparing masks to running reconstructions in WebODM. The guide assumes you have a working installation of [3D Slicer](https://www.slicer.org) and the SlicerPhotogrammetry extension.  
+This document will guide you through the **Photogrammetry** module's features, from loading models and preparing masks to running reconstructions in WebODM. The guide assumes you have a working installation of [3D Slicer](https://www.slicer.org) and the SlicerPhotogrammetry extension.  
 
 ## Table of Contents
 1. [Overview](#1-overview)
@@ -34,7 +34,7 @@ This document will guide you through the **SlicerPhotogrammetry** module's featu
 
 ## 1. Overview
 
-**SlicerPhotogrammetry** is a 3D Slicer module designed to help users transform large sets of photographs into a single 3D model using **photogrammetry**. The module integrates:
+**Photogrammetry** is a 3D Slicer module designed to help users transform large sets of photographs into a single 3D model using **photogrammetry**. The module integrates:
 - **[Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything)** for efficient masking of each image (removing background, highlighting your subject).
 - **[WebODM / NodeODM](https://www.opendronemap.org/webodm/)** for aerial or close-range photogrammetry reconstruction.
 - **Additional** tools for generating Ground Control Point (GCP) data (optional but useful if you have known coordinates).
@@ -256,8 +256,6 @@ When WebODM finishes:
 
 From there, you can continue analyzing or refining in Slicer, or export to other software.
 
-
-**Thank you for using SlicerPhotogrammetry!**
 
 ## Funding Acknowledgement
 Photogrammetry extension is supported by grants (DBI/2301405, OAC/2118240) from National Science Foundation to AMM (Seattle Children's Research Institute) 
