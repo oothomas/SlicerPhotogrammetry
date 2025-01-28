@@ -1,7 +1,7 @@
 #
 # SlicerPhotogrammetry.py
 #
-# COMPLETE MODULE CODE WITH NEW SAVE/RESTORE FEATURE
+# COMPLETE MODULE CODE WITH NEW TOOLTIP FEATURE FOR WEBODM PARAMETERS
 #
 
 import os
@@ -20,7 +20,7 @@ import subprocess  # for new Docker commands
 import json  # NEW >> For saving/restoring reconstructions
 from slicer.ScriptedLoadableModule import *
 from typing import List
-
+import types
 
 def convert_numpy_types(obj):
     """
@@ -86,11 +86,11 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
      - Creating _mask.png for webODM,
      - Creating single combined GCP file for all sets,
      - Non-blocking WebODM tasks (using pyodm),
-     - Checking/Installing/Re-launching WebODM on port 3002 with GPU support (now simplified to two buttons),
+     - Checking/Installing/Re-launching WebODM on port 3002 with GPU support,
      - Inclusion/Exclusion point marking for SAM,
      - A "Mask All Images In Set" workflow that removes existing masks,
        lets you place an ROI bounding box for the entire set, then finalize for all,
-     - Importing a completed WebODM model as an OBJ and switching to a 3D layout.
+     - Importing a completed WebODM model as an OBJ and switching to a 3D layout,
      - NEW >> Saving/Restoring WebODM tasks (via JSON).
     """
 
@@ -466,12 +466,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         buttonsRow.addWidget(self.saveTaskButton)
         self.saveTaskButton.enabled = False
         self.restoreTaskButton.enabled = False
-
         buttonsRow.addWidget(self.restoreTaskButton)
         saveRestoreLayout.addRow(buttonsRow)
 
         self.saveTaskButton.connect('clicked(bool)', self.onSaveTaskClicked)
         self.restoreTaskButton.connect('clicked(bool)', self.onRestoreTaskClicked)
+
+        tab1Layout.addStretch(1)
         # END NEW >>
 
         #
@@ -537,27 +538,106 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         webodmTaskFormLayout = qt.QFormLayout(webodmTaskCollapsible)
 
         self.nodeIPLineEdit = qt.QLineEdit("127.0.0.1")
+        self.nodeIPLineEdit.setToolTip("Enter the IP address of the NodeODM instance (e.g. 127.0.0.1).")
         webodmTaskFormLayout.addRow("Node IP:", self.nodeIPLineEdit)
 
         self.nodePortSpinBox = qt.QSpinBox()
         self.nodePortSpinBox.setMinimum(1)
         self.nodePortSpinBox.setMaximum(65535)
         self.nodePortSpinBox.setValue(3002)
+        self.nodePortSpinBox.setToolTip("Port number on which NodeODM is listening. Commonly 3001 or 3002.")
         webodmTaskFormLayout.addRow("Node Port:", self.nodePortSpinBox)
+
+        # ----------------
+        # NEW >> Tooltips for each WebODM parameter
+        # ----------------
+        parameterTooltips = {
+            "ignore-gsd": (
+                "Ignore Ground Sampling Distance (GSD). A memory/processor-hungry setting if true.\n"
+                "Ordinarily, GSD caps maximum resolution. Use with caution.\nDefault: False"
+            ),
+            "matcher-neighbors": (
+                "Perform image matching with the nearest images based on GPS exif data.\n"
+                "Set to 0 to match by triangulation.\nDefault: 0"
+            ),
+            "mesh-octree-depth": (
+                "Octree depth used in mesh reconstruction. Increase for more vertices.\n"
+                "Typical range 8-12.\nDefault: 11"
+            ),
+            "mesh-size": (
+                "Max vertex count for the output mesh.\nDefault: 200000"
+            ),
+            "min-num-features": (
+                "Minimum number of features to extract per image.\n"
+                "Higher values can help with low-overlap areas but increase processing.\nDefault: 10000"
+            ),
+            "pc-filter": (
+                "Filters the point cloud by removing outliers.\n"
+                "Value = # of standard deviations from local mean.\nDefault: 5"
+            ),
+            "depthmap-resolution": (
+                "Sets the resolution for depth maps.\n"
+                "Higher values = more detail, but more memory/time.\nTypical range 2048..8192.\nDefault: 2048"
+            ),
+            "matcher-type": (
+                "Matcher algorithm: bruteforce, bow, or flann.\n"
+                "FLANN is slower but stable, BOW is faster but might miss matches,\n"
+                "BRUTEFORCE is slow but robust.\nDefault: flann"
+            ),
+            "feature-type": (
+                "Keypoint/descriptor algorithm: akaze, dspsift, hahog, orb, sift.\n"
+                "Default: dspsift"
+            ),
+            "feature-quality": (
+                "Feature extraction quality: ultra, high, medium, low, lowest.\n"
+                "Higher quality = better features, but slower.\nDefault: high"
+            ),
+            "pc-quality": (
+                "Point cloud quality: ultra, high, medium, low, lowest.\n"
+                "Higher = denser cloud, more resources.\nDefault: medium"
+            ),
+            "optimize-disk-space": (
+                "Delete large intermediate files to reduce disk usage.\n"
+                "Prevents partial pipeline restarts.\nDefault: False"
+            ),
+            "rerun": (
+                "Rerun only a specific pipeline stage and stop.\n"
+                "Options: dataset, split, merge, opensfm, openmvs, etc.\n"
+                "Default: (none)"
+            ),
+            "no-gpu": (
+                "Disable GPU usage even if available.\nDefault: False"
+            ),
+        }
+        # ----------------
 
         for factorName, levels in self.factorLevels.items():
             combo = qt.QComboBox()
             for val in levels:
                 combo.addItem(str(val))
+
+            # Assign the tooltip text for each parameter from the dictionary above:
+            if factorName in parameterTooltips:
+                combo.setToolTip(parameterTooltips[factorName])
+            else:
+                combo.setToolTip(f"Parameter '{factorName}' is not documented in the tooltips dictionary.")
+
             self.factorComboBoxes[factorName] = combo
             webodmTaskFormLayout.addRow(f"{factorName}:", combo)
 
         self.maxConcurrencySpinBox = qt.QSpinBox()
         self.maxConcurrencySpinBox.setRange(16, 256)
         self.maxConcurrencySpinBox.setValue(16)
+        self.maxConcurrencySpinBox.setToolTip(
+            "Maximum number of processes used by WebODM.\n"
+            "Higher values = faster but more memory usage."
+        )
         webodmTaskFormLayout.addRow("max-concurrency:", self.maxConcurrencySpinBox)
 
         self.datasetNameLineEdit = qt.QLineEdit("SlicerReconstruction")
+        self.datasetNameLineEdit.setToolTip(
+            "Name of the dataset in WebODM.\nThis will be the reconstruction folder label."
+        )
         webodmTaskFormLayout.addRow("name:", self.datasetNameLineEdit)
 
         self.launchWebODMTaskButton = qt.QPushButton("Run WebODM Task With Selected Parameters (non-blocking)")
@@ -616,6 +696,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         """
         Ensure all needed Python dependencies are installed.
         """
+        try:
+            import OBJFile
+        except ModuleNotFoundError:
+            slicer.util.messageBox("OBJFile from the SlicerMorph Extension is required. "
+                                   "Please install SlicerMorph from the Extensions Manager.")
+
         try:
             import PyTorchUtils
         except ModuleNotFoundError:
@@ -2472,8 +2558,6 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # 3) Re-process folders (onProcessFoldersClicked) to populate subfolders
         #    This sets self.setStates. Then we override with the loaded setStates.
         if os.path.isdir(masterFolder) and os.path.isdir(outputFolder):
-            # We ensure the model is loaded or the user can do it manually.
-            # (We won't force load the SAM model again if we haven't yet. That can be done by user.)
             self.onProcessFoldersClicked()
 
             # Overwrite self.setStates with loaded data
@@ -2486,16 +2570,12 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 # Convert string keys back to integer keys in "imageStates"
                 restoredImageStates = {}
                 for strKey, stateVal in info["imageStates"].items():
-                    intKey = int(strKey)  # convert "0" --> 0, "1" --> 1, etc.
+                    intKey = int(strKey)
                     restoredImageStates[intKey] = stateVal
 
-                # Now store them
                 info["imageStates"] = restoredImageStates
-
-                # Then reassign them into self.setStates
                 self.setStates[setName]["imageStates"] = info["imageStates"]
                 self.setStates[setName]["imagePaths"] = info["imagePaths"]
-                # We skip exifData since that's not in the file; we can re-check if needed.
 
             # 4) Re-check the pre-existing masks for each loaded set
             for setName in self.setStates.keys():
@@ -2746,13 +2826,39 @@ class SlicerWebODMManager:
             )
             return
 
-        loadedNode = slicer.util.loadModel(objPath)
-        if loadedNode:
-            layoutMgr = slicer.app.layoutManager()
-            layoutMgr.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
-            slicer.util.infoDisplay("Imported model and switched to 3D layout.")
-        else:
-            slicer.util.warningDisplay("Failed to load model. Check logs.")
+        try:
+            import OBJFile  # Your unmodified module
+
+            # Create a dummy Python object to stand in for the "parent"
+            dummyParent = types.SimpleNamespace()
+
+            # Instantiate the custom OBJ reader with the dummy object
+            reader = OBJFile.OBJFileFileReader(dummyParent)
+            properties = {'fileName': objPath}
+
+            # Attempt to load the textured OBJ
+            success = reader.load(properties)
+            if success:
+                # Now, dummyParent should have loadedNodes set by OBJFileFileReader
+                if not hasattr(dummyParent, 'loadedNodes') or not dummyParent.loadedNodes:
+                    slicer.util.warningDisplay(
+                        "Reader indicated success, but 'loadedNodes' was not set on the parent."
+                    )
+                    return
+
+                nodeID = dummyParent.loadedNodes[0]
+                loadedNode = slicer.mrmlScene.GetNodeByID(nodeID)
+                if loadedNode:
+                    layoutMgr = slicer.app.layoutManager()
+                    layoutMgr.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+                    slicer.util.infoDisplay("Imported textured OBJ and switched to 3D layout.")
+                else:
+                    slicer.util.warningDisplay("Reader indicated success but could not get the node.")
+            else:
+                slicer.util.warningDisplay("Failed to load textured model. Check logs.")
+
+        except Exception as e:
+            slicer.util.warningDisplay(f"Exception while loading textured model: {str(e)}")
 
 
 class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
