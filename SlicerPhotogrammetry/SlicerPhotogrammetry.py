@@ -678,7 +678,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.addLayoutButton(self.layoutId, "Double Red Viewport",
                              "Custom Layout for Photogrammetry Module",
-                             "red_squared_lo_icon.jpg", slicer.photogrammetryLO)
+                             "red_squared_lo_icon.png", slicer.photogrammetryLO)
 
     def ensure_webodm_folder_permissions(self):
         """
