@@ -1,5 +1,5 @@
 #
-# SlicerPhotogrammetry.py
+# Photogrammetry.py
 #
 # COMPLETE MODULE CODE WITH NEW TOOLTIP FEATURE FOR WEBODM PARAMETERS
 #
@@ -22,6 +22,7 @@ from slicer.ScriptedLoadableModule import *
 from typing import List
 import types
 
+
 def convert_numpy_types(obj):
     """
     Recursively convert any NumPy numeric types to native Python
@@ -43,10 +44,10 @@ def convert_numpy_types(obj):
         return obj
 
 
-class SlicerPhotogrammetry(ScriptedLoadableModule):
+class Photogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        self.parent.title = "SlicerPhotogrammetry"
+        self.parent.title = "Photogrammetry"
         self.parent.categories = ["SlicerPhotogrammetry"]
         self.parent.dependencies = []
         self.parent.contributors = ["Oshane Thomas"]
@@ -76,7 +77,7 @@ class SlicerPhotogrammetry(ScriptedLoadableModule):
         """
 
 
-class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
+class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
     """
     Manages UI for:
      - SAM model loading,
@@ -266,7 +267,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         ScriptedLoadableModuleWidget.setup(self)
         self.load_dependencies()
-        self.logic = SlicerPhotogrammetryLogic()
+        self.logic = PhotogrammetryLogic()
 
         self.setupLogger()
         self.layout.setAlignment(qt.Qt.AlignTop)
@@ -311,13 +312,13 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.loadModelButton.connect('clicked(bool)', self.onLoadModelClicked)
 
         self.masterFolderSelector = ctk.ctkDirectoryButton()
-        savedMasterFolder = slicer.app.settings().value("SlicerPhotogrammetry/masterFolderPath", "")
+        savedMasterFolder = slicer.app.settings().value("Photogrammetry/masterFolderPath", "")
         if os.path.isdir(savedMasterFolder):
             self.masterFolderSelector.directory = savedMasterFolder
         parametersFormLayout.addRow("Input Folder:", self.masterFolderSelector)
 
         self.outputFolderSelector = ctk.ctkDirectoryButton()
-        savedOutputFolder = slicer.app.settings().value("SlicerPhotogrammetry/outputFolderPath", "")
+        savedOutputFolder = slicer.app.settings().value("Photogrammetry/outputFolderPath", "")
         if os.path.isdir(savedOutputFolder):
             self.outputFolderSelector.directory = savedOutputFolder
         parametersFormLayout.addRow("Output Folder:", self.outputFolderSelector)
@@ -508,7 +509,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.findGCPScriptSelector.setToolTip("Select path to Find-GCP.py script.")
         webODMFormLayout.addRow("Find-GCP Script:", self.findGCPScriptSelector)
 
-        savedFindGCPScript = slicer.app.settings().value("SlicerPhotogrammetry/findGCPScriptPath", "")
+        savedFindGCPScript = slicer.app.settings().value("Photogrammetry/findGCPScriptPath", "")
         if os.path.isfile(savedFindGCPScript):
             self.findGCPScriptSelector.setCurrentPath(savedFindGCPScript)
         self.findGCPScriptSelector.connect('currentPathChanged(QString)', self.onFindGCPScriptChanged)
@@ -666,7 +667,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.createMasterNodes()
 
-        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+        modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
         self.webODMLocalFolder = os.path.join(modulePath, 'Resources', 'WebODM')
 
         # Ensure the folder exists with proper permissions
@@ -705,7 +706,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         try:
             import PyTorchUtils
         except ModuleNotFoundError:
-            slicer.util.messageBox("SlicerPhotogrammetry requires the PyTorch extension. "
+            slicer.util.messageBox("Photogrammetry requires the PyTorch extension. "
                                    "Please install it from the Extensions Manager.")
         torchLogic = None
         try:
@@ -854,7 +855,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
         red2Comp.SetBackgroundVolumeID(self.masterMaskedVolumeNode.GetID())
 
     def onFindGCPScriptChanged(self, newPath):
-        slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", newPath)
+        slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", newPath)
 
     def updateMaskedCounter(self):
         totalImages = 0
@@ -929,8 +930,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay("Please select a valid output folder.")
             return
 
-        slicer.app.settings().setValue("SlicerPhotogrammetry/masterFolderPath", masterFolderPath)
-        slicer.app.settings().setValue("SlicerPhotogrammetry/outputFolderPath", outputFolderPath)
+        slicer.app.settings().setValue("Photogrammetry/masterFolderPath", masterFolderPath)
+        slicer.app.settings().setValue("Photogrammetry/outputFolderPath", outputFolderPath)
 
         # Prepare subfolders
         subfolders = [f for f in os.listdir(masterFolderPath)
@@ -2096,7 +2097,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.pip_install("GitPython")
             import git  # try again
 
-        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+        modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
         resourcesFolder = os.path.join(modulePath, 'Resources')
         os.makedirs(resourcesFolder, exist_ok=True)
 
@@ -2112,7 +2113,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 slicer.util.infoDisplay("Using existing clone; no changes made.")
                 if os.path.isfile(localGCPFindScript):
                     self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
-                    slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+                    slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
                 else:
                     slicer.util.warningDisplay(
                         f"Existing clone found, but {localGCPFindScript} does not exist.\n"
@@ -2149,7 +2150,7 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return
 
         self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
-        slicer.app.settings().setValue("SlicerPhotogrammetry/findGCPScriptPath", localGCPFindScript)
+        slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
 
     def cleanup(self):
         self.saveCurrentSetState()
@@ -2395,8 +2396,8 @@ class SlicerPhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.infoDisplay("WebODM launched successfully on port 3002.")
             self.nodeIPLineEdit.setText("127.0.0.1")
             self.nodePortSpinBox.setValue(3002)
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMIP", "127.0.0.1")
-            slicer.app.settings().setValue("SlicerPhotogrammetry/WebODMPort", "3002")
+            slicer.app.settings().setValue("Photogrammetry/WebODMIP", "127.0.0.1")
+            slicer.app.settings().setValue("Photogrammetry/WebODMPort", "3002")
         except Exception as e:
             slicer.util.errorDisplay(f"Failed to launch WebODM container:\n{str(e)}")
 
@@ -2861,7 +2862,7 @@ class SlicerWebODMManager:
             slicer.util.warningDisplay(f"Exception while loading textured model: {str(e)}")
 
 
-class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
+class PhotogrammetryLogic(ScriptedLoadableModuleLogic):
     """
     Loads the SAM model, runs segmentation on color arrays.
     """
@@ -2892,7 +2893,7 @@ class SlicerPhotogrammetryLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def check_and_download_weights(filename, weights_url):
-        modulePath = os.path.dirname(slicer.modules.slicerphotogrammetry.path)
+        modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
         resourcePath = os.path.join(modulePath, 'Resources', filename)
         if not os.path.isfile(resourcePath):
             slicer.util.infoDisplay(f"Downloading {filename}... This may take a few minutes...", autoCloseMsec=2000)
