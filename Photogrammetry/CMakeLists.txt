@@ -1,5 +1,5 @@
 #-----------------------------------------------------------------------------
-set(MODULE_NAME SlicerPhotogrammetry)
+set(MODULE_NAME Photogrammetry)
 
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
