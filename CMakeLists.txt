@@ -9,7 +9,7 @@ set(EXTENSION_CONTRIBUTORS "Oshane Thomas (SCRI), Murat Maga (SCRI)")
 set(EXTENSION_DESCRIPTION "An extension to preprocess (masking) large collection photographs which then can be processed to construct 3D models with texture.")
 set(EXTENSION_ICONURL "https://raw.githubusercontent.com/SlicerMorph/SlicerEditor/main/SlicerPhotogrammetry.png")
 set(EXTENSION_SCREENSHOTURLS "https://raw.githubusercontent.com/SlicerMorph/SlicerEditor/main/screenshot.png https://raw.githubusercontent.com/SlicerMorph/SlicerEditor/main/screenshot_2.png")
-set(EXTENSION_DEPENDS "SlicerMorph PyTorch") # List all dependencies separated by semicolons
+set(EXTENSION_DEPENDS "SlicerMorph PyTorch")
 
 #-----------------------------------------------------------------------------
 # Extension dependencies
