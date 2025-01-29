@@ -83,9 +83,10 @@ Upon first opening the **SlicerPhotogrammetry** module, you will see a dropdown 
 
 1. **Input Folder:** Should contain **multiple subfolders** (each subfolder is one "image set"). For example:
    - `Beaver_Skull_3_Images`
-     - `Set1` (images of the object from one session)
-     - `Set2` (images from another session)
+     - `Set1` (all photographs of the object taken in a first orientation -e.g., top view)
+     - `Set2` (all photographs of the object taken in a second orientation, -e.g., bottom view)
      - etc.
+Keeping similar orientations in sets help with the workflow associated with masking the background (see below).
 
 2. **Output Folder:** A separate folder you create for masked images and where final results will be placed.
 
