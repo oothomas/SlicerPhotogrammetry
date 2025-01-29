@@ -350,6 +350,9 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.processFoldersProgressBar.setVisible(False)
         parametersFormLayout.addWidget(self.processFoldersProgressBar)
 
+        self.maskedCountLabel = qt.QLabel("0/0 Masked")
+        parametersFormLayout.addRow("Overall Progress:", self.maskedCountLabel)
+
         self.imageSetComboBox = qt.QComboBox()
         self.imageSetComboBox.enabled = False
         parametersFormLayout.addRow("Image Set:", self.imageSetComboBox)
@@ -406,20 +409,12 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.finalizeAllMaskButton.connect('clicked(bool)', self.onFinalizeAllMaskClicked)
         maskAllLayout.addWidget(self.finalizeAllMaskButton)
 
-        parametersFormLayout.addRow("Batch Masking:", maskAllLayout)
+        parametersFormLayout.addRow("Mask Batch:", maskAllLayout)
 
         self.maskAllProgressBar = qt.QProgressBar()
         self.maskAllProgressBar.setVisible(False)
         self.maskAllProgressBar.setTextVisible(True)
         parametersFormLayout.addWidget(self.maskAllProgressBar)
-
-        self.maskedCountLabel = qt.QLabel("Masked: 0/0")
-        parametersFormLayout.addRow("Overall Progress:", self.maskedCountLabel)
-
-        self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
-        self.placeBoundingBoxButton.enabled = False
-        parametersFormLayout.addWidget(self.placeBoundingBoxButton)
-        self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
 
         #
         # NEW: Inclusion/Exclusion points UI
@@ -446,13 +441,21 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.clearPointsButton.connect('clicked(bool)', self.onClearPointsClicked)
         pointsButtonsLayout.addWidget(self.clearPointsButton)
 
-        parametersFormLayout.addRow("Image Masking:", pointsButtonsLayout)
+        parametersFormLayout.addRow(" ", pointsButtonsLayout)
+
+        singleMaskingLayout = qt.QHBoxLayout()
+
+        self.placeBoundingBoxButton = qt.QPushButton("Place Bounding Box")
+        self.placeBoundingBoxButton.enabled = False
+        singleMaskingLayout.addWidget(self.placeBoundingBoxButton)
+        self.placeBoundingBoxButton.connect('clicked(bool)', self.onPlaceBoundingBoxClicked)
 
         self.maskCurrentImageButton = qt.QPushButton("Mask Current Image")
         self.maskCurrentImageButton.enabled = False
-        parametersFormLayout.addWidget(self.maskCurrentImageButton)
+        singleMaskingLayout.addWidget(self.maskCurrentImageButton)
         self.maskCurrentImageButton.connect('clicked(bool)', self.onMaskCurrentImageClicked)
 
+        parametersFormLayout.addRow("Mask Image:", singleMaskingLayout)
         # Save references for enabling/disabling
         self.buttonsToManage = [
             self.masterFolderSelector,
@@ -884,7 +887,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             for _, info in setData["imageStates"].items():
                 if info["state"] == "masked":
                     maskedCount += 1
-        self.maskedCountLabel.setText(f"Masked: {maskedCount}/{totalImages}")
+        self.maskedCountLabel.setText(f"{maskedCount}/{totalImages} Masked")
 
     def onLoadModelClicked(self):
         variant = self.samVariantCombo.currentText
@@ -1042,7 +1045,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.imageIndexLabel.setText("Image 0")
 
         self.launchWebODMTaskButton.setEnabled(False)
-        self.maskedCountLabel.setText("Masked: 0/0")
+        self.maskedCountLabel.setText("0/0 Masked")
 
         self.imageCache.clear()
         self.resetMasterVolumes()
