@@ -48,10 +48,10 @@ class Photogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = "Photogrammetry"
-        self.parent.categories = ["SlicerMorph.Photogrammetry"]
+        self.parent.categories = ["SlicerPhotogrammetry"]
         self.parent.dependencies = []
         self.parent.contributors = ["Oshane Thomas (SCRI), Murat Maga (SCRI)"]
-        self.parent.helpText = """Photogrammetry is a 3D Slicer module designed to streamline the process of 
+        self.parent.helpText = """SlicerPhotogrammetry is a 3D Slicer module designed to streamline the process of 
         photogrammetry reconstruction. This module integrates the Segment Anything Model (SAM) for semi-automatic 
         image masking and provides seamless connectivity to WebODM for generating high-quality 3D reconstructions 
         from photographs. Key features include:
@@ -69,7 +69,9 @@ class Photogrammetry(ScriptedLoadableModule):
 
         self.parent.acknowledgementText = """This module was developed with support from the National Science 
         Foundation under grants DBI/2301405 and OAC/2118240 awarded to AMM at Seattle Children's Research Institute. 
-        """
+        We extend our gratitude to the 3D Slicer and WebODM communities for their ongoing support and open-source 
+        contributions. Special thanks to the developers of the Segment Anything Model (SAM) for their impactful work 
+        in segmentation technology."""
 
         # Suppress VTK warnings globally
         vtk.vtkObject.GlobalWarningDisplayOff()
@@ -268,6 +270,9 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.saveTaskButton = None
         self.restoreTaskButton = None
 
+        self.iconGreen = self.createColoredIcon(qt.QColor(0, 200, 0))
+        self.iconRed = self.createColoredIcon(qt.QColor(200, 0, 0))
+
     def setup(self):
         """
         Sets up the module GUI and logic, including:
@@ -356,6 +361,24 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow("Image Set:", self.imageSetComboBox)
         self.imageSetComboBox.connect('currentIndexChanged(int)', self.onImageSetSelected)
 
+        # Create a QTableWidget with 2 columns: "Index" and "Filename"
+        self.imageTable = qt.QTableWidget()
+        self.imageTable.setColumnCount(2)
+        self.imageTable.setHorizontalHeaderLabels(["Image", "Filename"])
+        self.imageTable.verticalHeader().hide()  # Hide the built-in row number labels
+        self.imageTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.imageTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.imageTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.imageTable.setMinimumHeight(200)  # Optional: ensures some visible space
+        # Make the second column stretch to fill the width:
+        self.imageTable.horizontalHeader().setStretchLastSection(True)
+
+        # Add the table widget to the form layout
+        parametersFormLayout.addRow("Image List:", self.imageTable)
+
+        # Connect the cellClicked signal to a slot we'll define:
+        self.imageTable.cellClicked.connect(self.onImageTableCellClicked)
+
         # Group box for resolution selection
         resGroupBox = qt.QGroupBox("Masking Resolution")
         resLayout = qt.QVBoxLayout(resGroupBox)
@@ -379,7 +402,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.nextButton = qt.QPushButton(">")
         self.nextButton.setToolTip("Go to the next image")
 
-        self.imageIndexLabel = qt.QLabel("Image 0")
+        self.imageIndexLabel = qt.QLabel("Image 1")
         self.imageIndexLabel.setAlignment(qt.Qt.AlignCenter)
 
         self.prevButton.enabled = False
@@ -701,6 +724,69 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                              "Custom Layout for Photogrammetry Module",
                              "red_squared_lo_icon.png", slicer.photogrammetryLO)
 
+    def createColoredIcon(self, color, size=16):
+        pixmap = qt.QPixmap(size, size)
+        pixmap.fill(color)
+        return qt.QIcon(pixmap)
+
+    def isSetFullyMasked(self, setName):
+        setInfo = self.setStates.get(setName, None)
+        if not setInfo:
+            return False
+        # If any image is not masked, return False
+        for _, imageState in setInfo["imageStates"].items():
+            if imageState["state"] != "masked":
+                return False
+        return True
+
+    def onImageTableCellClicked(self, row, column):
+        """
+        When the user clicks a table row, jump directly to that image.
+        """
+        self.currentImageIndex = row  # zero-based
+        self.updateVolumeDisplay()
+
+    def updateImageTable(self):
+        """
+        Refreshes the table rows based on self.imagePaths and self.imageStates.
+        Red highlight = unmasked, Green highlight = masked.
+        """
+        if not self.imagePaths:
+            self.imageTable.setRowCount(0)
+            return
+
+        numImages = len(self.imagePaths)
+        self.imageTable.setRowCount(numImages)
+
+        for rowIndex in range(numImages):
+            # We assume one-based indexing for display
+            displayIndex = rowIndex + 1
+            imagePath = self.imagePaths[rowIndex]
+            baseName = os.path.basename(imagePath)
+
+            # Create QTableWidgetItems for the two columns
+            indexItem = qt.QTableWidgetItem(str(displayIndex))
+            fileItem = qt.QTableWidgetItem(baseName)
+
+            # Check if masked or not
+            st = self.imageStates[rowIndex]["state"]
+            if st == "masked":
+                # green
+                color = qt.QColor(200, 255, 200)
+            else:
+                # "none" or "bbox" => not fully masked => red
+                color = qt.QColor(255, 200, 200)
+
+            brush = qt.QBrush(color)
+            indexItem.setBackground(brush)
+            fileItem.setBackground(brush)
+
+            self.imageTable.setItem(rowIndex, 0, indexItem)
+            self.imageTable.setItem(rowIndex, 1, fileItem)
+
+        # Optional: auto-resize the first column for the index
+        # self.imageTable.resizeColumnToContents(0)
+
     def ensure_webodm_folder_permissions(self):
         """
         Create the WebODM folder if it doesn't exist and set permissions.
@@ -924,6 +1010,16 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         else:
             slicer.util.errorDisplay("Failed to load the model. Check logs.")
 
+    def updateSetComboBoxIcons(self):
+        """
+        Loop over each combo box item, check if that set is fully masked,
+        and set its icon green/red accordingly.
+        """
+        for i in range(self.imageSetComboBox.count):
+            setName = self.imageSetComboBox.itemText(i)
+            icon = self.iconGreen if self.isSetFullyMasked(setName) else self.iconRed
+            self.imageSetComboBox.setItemIcon(i, icon)
+
     def onProcessFoldersClicked(self):
         """
         Automatically load every subfolder (set) under the master folder into self.setStates.
@@ -956,13 +1052,15 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Prepare subfolders
         subfolders = [f for f in os.listdir(masterFolderPath)
                       if os.path.isdir(os.path.join(masterFolderPath, f))]
+        subfolders = sorted(subfolders)
+
         self.imageSetComboBox.clear()
         self.processFoldersProgressBar.setVisible(True)
         self.processFoldersProgressBar.setRange(0, len(subfolders))
         self.processFoldersProgressBar.setValue(0)
 
         for idx, sf in enumerate(subfolders):
-            self.imageSetComboBox.addItem(sf)
+            #self.imageSetComboBox.addItem(sf)
 
             setFolderPath = os.path.join(masterFolderPath, sf)
             imagePaths = self.logic.get_image_paths_from_folder(setFolderPath)
@@ -996,6 +1094,10 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.imagePaths = imagePaths
             self.imageStates = imageStates
             self.checkPreExistingMasks()
+
+            # At this point, self.imageStates is updated, so we can compute isSetFullyMasked(sf).
+            iconToUse = self.iconGreen if self.isSetFullyMasked(sf) else self.iconRed
+            self.imageSetComboBox.addItem(iconToUse, sf)
 
             self.processFoldersProgressBar.setValue(idx + 1)
             slicer.app.processEvents()
@@ -1040,7 +1142,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskAllImagesButton.enabled = False
         self.prevButton.enabled = False
         self.nextButton.enabled = False
-        self.imageIndexLabel.setText("Image 0")
+        self.imageIndexLabel.setText("Image 1")
 
         self.launchWebODMTaskButton.setEnabled(False)
         self.maskedCountLabel.setText("0/0 Masked")
@@ -1154,9 +1256,17 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.refreshButtonStatesBasedOnCurrentState()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
+
+        if len(self.imagePaths) > 1:
+            self.prevButton.enabled = True
+            self.nextButton.enabled = True
+        else:
+            self.prevButton.enabled = False
+            self.nextButton.enabled = False
 
     def updateVolumeDisplay(self):
-        self.imageIndexLabel.setText(f"Image {self.currentImageIndex}")
+        self.imageIndexLabel.setText(f"Image {self.currentImageIndex + 1}")
         if self.currentImageIndex < 0 or self.currentImageIndex >= len(self.imagePaths):
             return
 
@@ -1307,22 +1417,60 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return maskArr
 
     def onPrevImage(self):
-        if self.currentImageIndex > 0:
+        """
+        Move to the previous image in the current set.
+        In circular (carousel) mode, if we are on the first image (index 0)
+        and the user clicks "prev", we jump to the last image in the set.
+        """
+
+        # --- No change needed here. Keep existing checks for no images. ---
+        if not self.imagePaths:
+            return
+
+        # --- CHANGE START: Carousel logic for prev ---
+        if self.currentImageIndex <= 0:
+            # We are at the first image (index = 0), so wrap to the last
+            self.currentImageIndex = len(self.imagePaths) - 1
+        else:
+            # Normal "move one back"
             self.currentImageIndex -= 1
-            self.updateVolumeDisplay()
-            if self.finalizingROI:
-                self.maskAllImagesButton.enabled = False
-            else:
-                self.maskAllImagesButton.enabled = True
+        # --- CHANGE END ---
+
+        self.updateVolumeDisplay()
+
+        # The rest is unchanged
+        if self.finalizingROI:
+            self.maskAllImagesButton.enabled = False
+        else:
+            self.maskAllImagesButton.enabled = True
 
     def onNextImage(self):
-        if self.currentImageIndex < len(self.imagePaths) - 1:
+        """
+        Move to the next image in the current set.
+        In circular (carousel) mode, if we are on the last image,
+        going forward jumps to the first image in the set.
+        """
+
+        # --- No change needed here. Keep existing checks for no images. ---
+        if not self.imagePaths:
+            return
+
+        # --- CHANGE START: Carousel logic for next ---
+        if self.currentImageIndex >= len(self.imagePaths) - 1:
+            # We are at the last image, wrap to the first
+            self.currentImageIndex = 0
+        else:
+            # Normal "move one forward"
             self.currentImageIndex += 1
-            self.updateVolumeDisplay()
-            if self.finalizingROI:
-                self.maskAllImagesButton.enabled = False
-            else:
-                self.maskAllImagesButton.enabled = True
+        # --- CHANGE END ---
+
+        self.updateVolumeDisplay()
+
+        # The rest is unchanged
+        if self.finalizingROI:
+            self.maskAllImagesButton.enabled = False
+        else:
+            self.maskAllImagesButton.enabled = True
 
     def onMaskCurrentImageClicked(self):
         """
@@ -1393,10 +1541,16 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
 
         # Restore normal button states
         self.restoreButtonStates()
         self.enableMaskAllImagesIfPossible()
+
+        self.imageTable.setEnabled(True)
+
+        # refresh icons for all sets
+        self.updateSetComboBoxIcons()
 
     def saveMaskedImage(self, index, colorArrFull, maskBool):
         from PIL import Image
@@ -1463,7 +1617,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.imageStates[idx]["bboxCoords"] = None
             self.imageStates[idx]["maskNodes"] = None
 
-        self.currentImageIndex = 0
+        # self.currentImageIndex = 0
         self.updateVolumeDisplay()
 
         self.globalMaskAllInProgress = True
@@ -1536,6 +1690,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.clearPointsButton.enabled = False
         self.stopAddingPointsButton.enabled = False
         self.maskAllImagesButton.enabled = False
+
+        self.imageTable.setEnabled(False)
 
     def onFinalizeAllMaskClicked(self):
         if not self.globalMaskAllInProgress:
@@ -1623,12 +1779,17 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
 
         self.restoreButtonStates()
+        self.imageTable.setEnabled(True)
 
         self.finalizingROI = False
         self.globalMaskAllInProgress = False
         self.maskAllImagesButton.enabled = True
+
+        # refresh icons for all sets
+        self.updateSetComboBoxIcons()
 
     def removeRoiNode(self):
         if self.boundingBoxRoiNode:
@@ -1751,6 +1912,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 else:
                     b.enabled = False
 
+        self.imageTable.setEnabled(False)
+
     def startPlacingROI(self):
         self.removeBboxLines()
         if self.boundingBoxRoiNode:
@@ -1809,6 +1972,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
         self.updateVolumeDisplay()
 
     def deleteMaskFile(self, index, setName):
