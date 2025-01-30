@@ -1258,6 +1258,13 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateWebODMTaskAvailability()
         self.updateImageTable()
 
+        if len(self.imagePaths) > 1:
+            self.prevButton.enabled = True
+            self.nextButton.enabled = True
+        else:
+            self.prevButton.enabled = False
+            self.nextButton.enabled = False
+
     def updateVolumeDisplay(self):
         self.imageIndexLabel.setText(f"Image {self.currentImageIndex + 1}")
         if self.currentImageIndex < 0 or self.currentImageIndex >= len(self.imagePaths):
