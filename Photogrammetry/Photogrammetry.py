@@ -358,6 +358,24 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow("Image Set:", self.imageSetComboBox)
         self.imageSetComboBox.connect('currentIndexChanged(int)', self.onImageSetSelected)
 
+        # Create a QTableWidget with 2 columns: "Index" and "Filename"
+        self.imageTable = qt.QTableWidget()
+        self.imageTable.setColumnCount(2)
+        self.imageTable.setHorizontalHeaderLabels(["Image", "Filename"])
+        self.imageTable.verticalHeader().hide()  # Hide the built-in row number labels
+        self.imageTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.imageTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.imageTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.imageTable.setMinimumHeight(200)  # Optional: ensures some visible space
+        # Make the second column stretch to fill the width:
+        self.imageTable.horizontalHeader().setStretchLastSection(True)
+
+        # Add the table widget to the form layout
+        parametersFormLayout.addRow("Image List:", self.imageTable)
+
+        # Connect the cellClicked signal to a slot we'll define:
+        self.imageTable.cellClicked.connect(self.onImageTableCellClicked)
+
         # Group box for resolution selection
         resGroupBox = qt.QGroupBox("Masking Resolution")
         resLayout = qt.QVBoxLayout(resGroupBox)
@@ -702,6 +720,54 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.addLayoutButton(self.layoutId, "Double Red Viewport",
                              "Custom Layout for Photogrammetry Module",
                              "red_squared_lo_icon.png", slicer.photogrammetryLO)
+
+    def onImageTableCellClicked(self, row, column):
+        """
+        When the user clicks a table row, jump directly to that image.
+        """
+        self.currentImageIndex = row  # zero-based
+        self.updateVolumeDisplay()
+
+    def updateImageTable(self):
+        """
+        Refreshes the table rows based on self.imagePaths and self.imageStates.
+        Red highlight = unmasked, Green highlight = masked.
+        """
+        if not self.imagePaths:
+            self.imageTable.setRowCount(0)
+            return
+
+        numImages = len(self.imagePaths)
+        self.imageTable.setRowCount(numImages)
+
+        for rowIndex in range(numImages):
+            # We assume one-based indexing for display
+            displayIndex = rowIndex + 1
+            imagePath = self.imagePaths[rowIndex]
+            baseName = os.path.basename(imagePath)
+
+            # Create QTableWidgetItems for the two columns
+            indexItem = qt.QTableWidgetItem(str(displayIndex))
+            fileItem = qt.QTableWidgetItem(baseName)
+
+            # Check if masked or not
+            st = self.imageStates[rowIndex]["state"]
+            if st == "masked":
+                # green
+                color = qt.QColor(200, 255, 200)
+            else:
+                # "none" or "bbox" => not fully masked => red
+                color = qt.QColor(255, 200, 200)
+
+            brush = qt.QBrush(color)
+            indexItem.setBackground(brush)
+            fileItem.setBackground(brush)
+
+            self.imageTable.setItem(rowIndex, 0, indexItem)
+            self.imageTable.setItem(rowIndex, 1, fileItem)
+
+        # Optional: auto-resize the first column for the index
+        # self.imageTable.resizeColumnToContents(0)
 
     def ensure_webodm_folder_permissions(self):
         """
@@ -1158,6 +1224,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.refreshButtonStatesBasedOnCurrentState()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
 
     def updateVolumeDisplay(self):
         self.imageIndexLabel.setText(f"Image {self.currentImageIndex + 1}")
@@ -1435,10 +1502,13 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
 
         # Restore normal button states
         self.restoreButtonStates()
         self.enableMaskAllImagesIfPossible()
+
+        self.imageTable.setEnabled(True)
 
     def saveMaskedImage(self, index, colorArrFull, maskBool):
         from PIL import Image
@@ -1579,6 +1649,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopAddingPointsButton.enabled = False
         self.maskAllImagesButton.enabled = False
 
+        self.imageTable.setEnabled(False)
+
     def onFinalizeAllMaskClicked(self):
         if not self.globalMaskAllInProgress:
             return
@@ -1665,8 +1737,10 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateVolumeDisplay()
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
 
         self.restoreButtonStates()
+        self.imageTable.setEnabled(True)
 
         self.finalizingROI = False
         self.globalMaskAllInProgress = False
@@ -1793,6 +1867,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                 else:
                     b.enabled = False
 
+        self.imageTable.setEnabled(False)
+
     def startPlacingROI(self):
         self.removeBboxLines()
         if self.boundingBoxRoiNode:
@@ -1851,6 +1927,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.updateMaskedCounter()
         self.updateWebODMTaskAvailability()
+        self.updateImageTable()
         self.updateVolumeDisplay()
 
     def deleteMaskFile(self, index, setName):
