@@ -270,6 +270,9 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.saveTaskButton = None
         self.restoreTaskButton = None
 
+        self.iconGreen = self.createColoredIcon(qt.QColor(0, 200, 0))
+        self.iconRed = self.createColoredIcon(qt.QColor(200, 0, 0))
+
     def setup(self):
         """
         Sets up the module GUI and logic, including:
@@ -721,6 +724,21 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                              "Custom Layout for Photogrammetry Module",
                              "red_squared_lo_icon.png", slicer.photogrammetryLO)
 
+    def createColoredIcon(self, color, size=16):
+        pixmap = qt.QPixmap(size, size)
+        pixmap.fill(color)
+        return qt.QIcon(pixmap)
+
+    def isSetFullyMasked(self, setName):
+        setInfo = self.setStates.get(setName, None)
+        if not setInfo:
+            return False
+        # If any image is not masked, return False
+        for _, imageState in setInfo["imageStates"].items():
+            if imageState["state"] != "masked":
+                return False
+        return True
+
     def onImageTableCellClicked(self, row, column):
         """
         When the user clicks a table row, jump directly to that image.
@@ -992,6 +1010,16 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         else:
             slicer.util.errorDisplay("Failed to load the model. Check logs.")
 
+    def updateSetComboBoxIcons(self):
+        """
+        Loop over each combo box item, check if that set is fully masked,
+        and set its icon green/red accordingly.
+        """
+        for i in range(self.imageSetComboBox.count):
+            setName = self.imageSetComboBox.itemText(i)
+            icon = self.iconGreen if self.isSetFullyMasked(setName) else self.iconRed
+            self.imageSetComboBox.setItemIcon(i, icon)
+
     def onProcessFoldersClicked(self):
         """
         Automatically load every subfolder (set) under the master folder into self.setStates.
@@ -1032,7 +1060,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.processFoldersProgressBar.setValue(0)
 
         for idx, sf in enumerate(subfolders):
-            self.imageSetComboBox.addItem(sf)
+            #self.imageSetComboBox.addItem(sf)
 
             setFolderPath = os.path.join(masterFolderPath, sf)
             imagePaths = self.logic.get_image_paths_from_folder(setFolderPath)
@@ -1066,6 +1094,10 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.imagePaths = imagePaths
             self.imageStates = imageStates
             self.checkPreExistingMasks()
+
+            # At this point, self.imageStates is updated, so we can compute isSetFullyMasked(sf).
+            iconToUse = self.iconGreen if self.isSetFullyMasked(sf) else self.iconRed
+            self.imageSetComboBox.addItem(iconToUse, sf)
 
             self.processFoldersProgressBar.setValue(idx + 1)
             slicer.app.processEvents()
@@ -1510,6 +1542,9 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
 
         self.imageTable.setEnabled(True)
 
+        # refresh icons for all sets
+        self.updateSetComboBoxIcons()
+
     def saveMaskedImage(self, index, colorArrFull, maskBool):
         from PIL import Image
         setData = self.setStates[self.currentSet]
@@ -1745,6 +1780,9 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.finalizingROI = False
         self.globalMaskAllInProgress = False
         self.maskAllImagesButton.enabled = True
+
+        # refresh icons for all sets
+        self.updateSetComboBoxIcons()
 
     def removeRoiNode(self):
         if self.boundingBoxRoiNode:
