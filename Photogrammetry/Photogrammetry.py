@@ -381,7 +381,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.nextButton = qt.QPushButton(">")
         self.nextButton.setToolTip("Go to the next image")
 
-        self.imageIndexLabel = qt.QLabel("Image 0")
+        self.imageIndexLabel = qt.QLabel("Image 1")
         self.imageIndexLabel.setAlignment(qt.Qt.AlignCenter)
 
         self.prevButton.enabled = False
@@ -958,6 +958,8 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         # Prepare subfolders
         subfolders = [f for f in os.listdir(masterFolderPath)
                       if os.path.isdir(os.path.join(masterFolderPath, f))]
+        subfolders = sorted(subfolders)
+
         self.imageSetComboBox.clear()
         self.processFoldersProgressBar.setVisible(True)
         self.processFoldersProgressBar.setRange(0, len(subfolders))
@@ -1042,7 +1044,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.maskAllImagesButton.enabled = False
         self.prevButton.enabled = False
         self.nextButton.enabled = False
-        self.imageIndexLabel.setText("Image 0")
+        self.imageIndexLabel.setText("Image 1")
 
         self.launchWebODMTaskButton.setEnabled(False)
         self.maskedCountLabel.setText("0/0 Masked")
@@ -1158,7 +1160,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.updateWebODMTaskAvailability()
 
     def updateVolumeDisplay(self):
-        self.imageIndexLabel.setText(f"Image {self.currentImageIndex}")
+        self.imageIndexLabel.setText(f"Image {self.currentImageIndex + 1}")
         if self.currentImageIndex < 0 or self.currentImageIndex >= len(self.imagePaths):
             return
 
@@ -1309,22 +1311,60 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             return maskArr
 
     def onPrevImage(self):
-        if self.currentImageIndex > 0:
+        """
+        Move to the previous image in the current set.
+        In circular (carousel) mode, if we are on the first image (index 0)
+        and the user clicks "prev", we jump to the last image in the set.
+        """
+
+        # --- No change needed here. Keep existing checks for no images. ---
+        if not self.imagePaths:
+            return
+
+        # --- CHANGE START: Carousel logic for prev ---
+        if self.currentImageIndex <= 0:
+            # We are at the first image (index = 0), so wrap to the last
+            self.currentImageIndex = len(self.imagePaths) - 1
+        else:
+            # Normal "move one back"
             self.currentImageIndex -= 1
-            self.updateVolumeDisplay()
-            if self.finalizingROI:
-                self.maskAllImagesButton.enabled = False
-            else:
-                self.maskAllImagesButton.enabled = True
+        # --- CHANGE END ---
+
+        self.updateVolumeDisplay()
+
+        # The rest is unchanged
+        if self.finalizingROI:
+            self.maskAllImagesButton.enabled = False
+        else:
+            self.maskAllImagesButton.enabled = True
 
     def onNextImage(self):
-        if self.currentImageIndex < len(self.imagePaths) - 1:
+        """
+        Move to the next image in the current set.
+        In circular (carousel) mode, if we are on the last image,
+        going forward jumps to the first image in the set.
+        """
+
+        # --- No change needed here. Keep existing checks for no images. ---
+        if not self.imagePaths:
+            return
+
+        # --- CHANGE START: Carousel logic for next ---
+        if self.currentImageIndex >= len(self.imagePaths) - 1:
+            # We are at the last image, wrap to the first
+            self.currentImageIndex = 0
+        else:
+            # Normal "move one forward"
             self.currentImageIndex += 1
-            self.updateVolumeDisplay()
-            if self.finalizingROI:
-                self.maskAllImagesButton.enabled = False
-            else:
-                self.maskAllImagesButton.enabled = True
+        # --- CHANGE END ---
+
+        self.updateVolumeDisplay()
+
+        # The rest is unchanged
+        if self.finalizingROI:
+            self.maskAllImagesButton.enabled = False
+        else:
+            self.maskAllImagesButton.enabled = True
 
     def onMaskCurrentImageClicked(self):
         """
@@ -1465,7 +1505,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             self.imageStates[idx]["bboxCoords"] = None
             self.imageStates[idx]["maskNodes"] = None
 
-        self.currentImageIndex = 0
+        # self.currentImageIndex = 0
         self.updateVolumeDisplay()
 
         self.globalMaskAllInProgress = True
