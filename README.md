@@ -3,13 +3,21 @@ An extension to preprocess (masking) large collection photographs which then can
 See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step up and optionally use Aruco markers to obtain physical scale of the object. 
 
 ## Prerequisites
+### Running on MorphoCloud
+There are no prerequisites if you are using MorphoCloud to run this extension. All necessary libraries are preloaded. 
+
+### Running Locally
 Torch (will install the PyTorch extension, if not already installed). 
+
+Currently only mode of operation supported is to launch the OpenDroneMap server locally. This requires having docker (and optionally Nvidia Container toolkit if you are planning to use a Nvidia GPU) installed and that the user running Slicer is authorized to launch docker images. 
 
 ## Sample Data
 
-# Photogrammetry User Guide
+https://app.box.com/shared/static/z8pypqqmel8pv4mp5k01philfrqep8xm.zip (320 photographs of a mountain beaver).
 
-This document will guide you through the **Photogrammetry** module's features, from loading models and preparing masks to running reconstructions in WebODM. The guide assumes you have a working installation of [3D Slicer](https://www.slicer.org) and the SlicerPhotogrammetry extension.  
+# User Guide
+
+This document will guide you through the **Photogrammetry** module's features, from loading models and preparing masks to running reconstructions through ODM. 
 
 ## Table of Contents
 1. [Overview](#1-overview)
@@ -50,17 +58,17 @@ This document will guide you through the **Photogrammetry** module's features, f
 
 ## 2. What is SAM?
 
-**SAM (Segment Anything Model)** is a state-of-the-art segmentation model by Meta (Facebook Research). It can segment objects in images with minimal user input:
+**SAM (Segment Anything Model)** is a state-of-the-art segmentation model by Meta. It can segment objects in images with minimal user input:
 - **Bounding boxes** around the object you wish to mask, and
 - **Inclusion (green) or Exclusion (red) points** indicating details SAM might miss or include erroneously.
 
-SAM supports several variants (ViT-base, ViT-large, ViT-huge) differing in file size, GPU memory demands, and inference speed.  
+SAM supports several variants (ViT-base, ViT-large, ViT-huge) differing in file size, GPU memory demands, and inference speed. 
 
 ---
 
 ## 3. Choosing the SAM Model Variant
 
-Upon first opening the **SlicerPhotogrammetry** module, you will see a dropdown labeled **SAM Variant**. The three typical variants are:
+Upon first opening the **Photogrammetry** module, you will see a dropdown labeled **SAM Variant**. The three typical variants are:
 
 1. **ViT-base (~376 MB):**  
    - Fastest inference, least GPU memory usage. Good if you have limited GPU or use CPU.
