@@ -48,10 +48,10 @@ class Photogrammetry(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = "Photogrammetry"
-        self.parent.categories = ["SlicerMorph.Photogrammetry"]
+        self.parent.categories = ["SlicerPhotogrammetry"]
         self.parent.dependencies = []
         self.parent.contributors = ["Oshane Thomas (SCRI), Murat Maga (SCRI)"]
-        self.parent.helpText = """Photogrammetry is a 3D Slicer module designed to streamline the process of 
+        self.parent.helpText = """SlicerPhotogrammetry is a 3D Slicer module designed to streamline the process of 
         photogrammetry reconstruction. This module integrates the Segment Anything Model (SAM) for semi-automatic 
         image masking and provides seamless connectivity to WebODM for generating high-quality 3D reconstructions 
         from photographs. Key features include:
@@ -69,7 +69,9 @@ class Photogrammetry(ScriptedLoadableModule):
 
         self.parent.acknowledgementText = """This module was developed with support from the National Science 
         Foundation under grants DBI/2301405 and OAC/2118240 awarded to AMM at Seattle Children's Research Institute. 
-        """
+        We extend our gratitude to the 3D Slicer and WebODM communities for their ongoing support and open-source 
+        contributions. Special thanks to the developers of the Segment Anything Model (SAM) for their impactful work 
+        in segmentation technology."""
 
         # Suppress VTK warnings globally
         vtk.vtkObject.GlobalWarningDisplayOff()
