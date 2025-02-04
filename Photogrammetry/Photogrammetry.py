@@ -855,20 +855,45 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             import segment_anything
         except ImportError:
             import os
-            from slicer.util import extractArchive
+            import slicer
+            from slicer.util import downloadFile, extractArchive, pip_install
 
+            # 1) Decide where to put the downloaded ZIP locally:
             modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
             resourcesFolder = os.path.join(modulePath, "Resources")
+            if not os.path.isdir(resourcesFolder):
+                os.makedirs(resourcesFolder)
+
             zipFilePath = os.path.join(resourcesFolder, "segment-anything-main.zip")
             localExtractDir = os.path.join(resourcesFolder, "segment-anything-main")
 
-            # 1) Extract ZIP
-            extractArchive(zipFilePath, localExtractDir)
+            # 2) Direct download link
+            url = "https://raw.githubusercontent.com/SlicerMorph/SlicerPhotogrammetry/master/Photogrammetry/Resources/segment-anything-main.zip"
 
-            # 2) pip install from the extracted folder
-            slicer.util.pip_install(localExtractDir)
+            # 3) Download the .zip file to zipFilePath
+            try:
+                slicer.util.infoDisplay(f"Downloading segment-anything ZIP from:\n{url}\nPlease wait...",
+                                        autoCloseMsec=2000)
+                downloadFile(url, zipFilePath, overwrite=True)
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to download segment-anything zip:\n{str(e)}")
+                raise
 
-            # Now try import again
+            # 4) Extract that ZIP to localExtractDir
+            try:
+                extractArchive(zipFilePath, localExtractDir)
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to unzip {zipFilePath}:\n{str(e)}")
+                raise
+
+            # 5) pip install from the extracted folder
+            try:
+                pip_install(localExtractDir)
+            except Exception as e:
+                slicer.util.errorDisplay(f"Failed to pip-install segment-anything from {localExtractDir}:\n{str(e)}")
+                raise
+
+            # 6) Finally, import again
             import segment_anything
 
         try:
@@ -2284,22 +2309,38 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def onCloneFindGCPClicked(self):
         import os
         import shutil
-        from slicer.util import extractArchive
+        import slicer
+        from slicer.util import downloadFile, extractArchive
 
+        # 1) Decide where to store the downloaded ZIP.
         modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
         resourcesFolder = os.path.join(modulePath, "Resources")
         os.makedirs(resourcesFolder, exist_ok=True)
 
-        # The ZIP you previously downloaded and placed in Resources:
+        # Local path where we'll download the ZIP:
         zipFilePath = os.path.join(resourcesFolder, "Find-GCP.zip")
 
-        # This is where we'll extract the ZIP?s contents:
+        # Folder to extract the ZIP?s contents into:
         cloneFolder = os.path.join(resourcesFolder, "Find-GCP-Repo")
 
-        # The main script inside that repo (after extraction):
+        # The main script we expect inside that repo:
         localGCPFindScript = os.path.join(cloneFolder, "gcp_find.py")
 
-        # Check if the folder is already there
+        # 2) Download link.
+        url = "https://raw.githubusercontent.com/SlicerMorph/SlicerPhotogrammetry/master/Photogrammetry/Resources/Find-GCP-master.zip"
+
+        # 3) Download the ZIP (overwrite if it already exists).
+        slicer.util.infoDisplay(
+            f"Downloading Find-GCP ZIP from:\n{url}\nPlease wait...",
+            autoCloseMsec=2000
+        )
+        try:
+            downloadFile(url, zipFilePath, overwrite=True)
+        except Exception as e:
+            slicer.util.errorDisplay(f"Failed to download Find-GCP zip:\n{str(e)}")
+            return
+
+        # 4) Ask user if we should overwrite the existing folder.
         if os.path.isdir(cloneFolder):
             msg = (
                 "The 'Find-GCP-Repo' folder already exists in the Resources directory.\n"
@@ -2325,7 +2366,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     )
                     return
 
-        # Now unzip the local file
+        # 5) Extract the freshly downloaded ZIP
         slicer.util.infoDisplay(
             f"Extracting the Find-GCP ZIP to:\n{cloneFolder}\nPlease wait...",
             autoCloseMsec=3000
@@ -2337,6 +2378,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay(f"Failed to unzip {zipFilePath}:\n{str(e)}")
             return
 
+        # 6) Confirm the expected script is present
         if not os.path.isfile(localGCPFindScript):
             slicer.util.warningDisplay(
                 f"ZIP extracted, but {localGCPFindScript} was not found.\n"
@@ -2344,7 +2386,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             )
             return
 
-        # Update the module?s UI / settings with the new script path
+        # 7) Update your module?s UI / settings with the new script path
         self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
         slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
 
