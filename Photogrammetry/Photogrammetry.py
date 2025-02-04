@@ -11,6 +11,7 @@ import qt
 import ctk
 import vtk
 import slicer
+
 import shutil
 import numpy as np
 import logging
@@ -19,6 +20,7 @@ import hashlib  # used for generating a short hash
 import subprocess  # for new Docker commands
 import json  # NEW >> For saving/restoring reconstructions
 from slicer.ScriptedLoadableModule import *
+from slicer.util import extractArchive
 from typing import List
 import types
 
@@ -852,14 +854,22 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         try:
             import segment_anything
         except ImportError:
-            slicer.util.pip_install("git+https://github.com/facebookresearch/segment-anything.git")
-            import segment_anything
+            import os
+            from slicer.util import extractArchive
 
-        try:
-            import git
-        except ImportError:
-            slicer.util.pip_install("GitPython")
-            import git
+            modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
+            resourcesFolder = os.path.join(modulePath, "Resources")
+            zipFilePath = os.path.join(resourcesFolder, "segment-anything-main.zip")
+            localExtractDir = os.path.join(resourcesFolder, "segment-anything-main")
+
+            # 1) Extract ZIP
+            extractArchive(zipFilePath, localExtractDir)
+
+            # 2) pip install from the extracted folder
+            slicer.util.pip_install(localExtractDir)
+
+            # Now try import again
+            import segment_anything
 
         try:
             import pyodm
@@ -2274,33 +2284,35 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
     def onCloneFindGCPClicked(self):
         import os
         import shutil
-
-        try:
-            import git
-        except ImportError:
-            slicer.util.pip_install("GitPython")
-            import git  # try again
+        from slicer.util import extractArchive
 
         modulePath = os.path.dirname(slicer.modules.photogrammetry.path)
-        resourcesFolder = os.path.join(modulePath, 'Resources')
+        resourcesFolder = os.path.join(modulePath, "Resources")
         os.makedirs(resourcesFolder, exist_ok=True)
 
+        # The ZIP you previously downloaded and placed in Resources:
+        zipFilePath = os.path.join(resourcesFolder, "Find-GCP.zip")
+
+        # This is where we'll extract the ZIP?s contents:
         cloneFolder = os.path.join(resourcesFolder, "Find-GCP-Repo")
+
+        # The main script inside that repo (after extraction):
         localGCPFindScript = os.path.join(cloneFolder, "gcp_find.py")
 
+        # Check if the folder is already there
         if os.path.isdir(cloneFolder):
             msg = (
                 "The 'Find-GCP-Repo' folder already exists in the Resources directory.\n"
-                "Would you like to delete it and clone again (overwrite)?"
+                "Would you like to delete it and extract again (overwrite)?"
             )
             if not slicer.util.confirmYesNoDisplay(msg):
-                slicer.util.infoDisplay("Using existing clone; no changes made.")
+                slicer.util.infoDisplay("Using existing folder; no changes made.")
                 if os.path.isfile(localGCPFindScript):
                     self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
                     slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
                 else:
                     slicer.util.warningDisplay(
-                        f"Existing clone found, but {localGCPFindScript} does not exist.\n"
+                        f"Existing folder found, but {localGCPFindScript} does not exist.\n"
                         "Please pick the correct script manually."
                     )
                 return
@@ -2309,30 +2321,30 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
                     shutil.rmtree(cloneFolder)
                 except Exception as e:
                     slicer.util.errorDisplay(
-                        f"Failed to remove existing cloned folder:\n{cloneFolder}\nError: {str(e)}"
+                        f"Failed to remove existing folder:\n{cloneFolder}\nError: {str(e)}"
                     )
                     return
 
+        # Now unzip the local file
         slicer.util.infoDisplay(
-            f"Cloning the entire Find-GCP repo to:\n{cloneFolder}\nPlease wait...",
+            f"Extracting the Find-GCP ZIP to:\n{cloneFolder}\nPlease wait...",
             autoCloseMsec=3000
         )
         try:
-            git.Repo.clone_from(
-                url="https://github.com/zsiki/Find-GCP.git",
-                to_path=cloneFolder
-            )
+            extractArchive(zipFilePath, cloneFolder)
+            slicer.util.infoDisplay("Unzipped Find-GCP successfully.")
         except Exception as e:
-            slicer.util.errorDisplay(f"Failed to clone Find-GCP repo:\n{str(e)}")
+            slicer.util.errorDisplay(f"Failed to unzip {zipFilePath}:\n{str(e)}")
             return
 
         if not os.path.isfile(localGCPFindScript):
             slicer.util.warningDisplay(
-                f"Repo cloned, but {localGCPFindScript} was not found.\n"
-                "Please check the repo contents or specify the correct script."
+                f"ZIP extracted, but {localGCPFindScript} was not found.\n"
+                "Please check the extracted contents or specify the correct script."
             )
             return
 
+        # Update the module?s UI / settings with the new script path
         self.findGCPScriptSelector.setCurrentPath(localGCPFindScript)
         slicer.app.settings().setValue("Photogrammetry/findGCPScriptPath", localGCPFindScript)
 
