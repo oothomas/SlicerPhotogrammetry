@@ -1,5 +1,9 @@
-cmake_minimum_required(VERSION 3.16.3...3.19.7 FATAL_ERROR)
+if(APPLE OR WIN32)
+  message(STATUS "SlicerPhotogrammetry is only supported on Linux. Skipping build on this platform.")
+  return()
+endif()
 
+cmake_minimum_required(VERSION 3.16.3...3.19.7 FATAL_ERROR)
 project(SlicerPhotogrammetry)
 
 #-----------------------------------------------------------------------------
