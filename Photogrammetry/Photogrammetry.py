@@ -822,6 +822,14 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             import PyTorchUtils
             torchLogic = PyTorchUtils.PyTorchUtilsLogic()
             if not torchLogic.torchInstalled():
+
+                if not slicer.util.confirmOkCancelDisplay(
+                        f"This module requires installation of additional Python packages. Installation needs network "
+                        f"connection and may take several minutes. Click OK to proceed.",
+                        "Confirm Python package installation"
+                ):
+                    raise InstallError("User cancelled.")
+
                 logging.debug('Installing PyTorch...')
                 torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
                 if torch:
