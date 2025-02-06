@@ -19,7 +19,7 @@ class ClusterPhotos(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         parent.title = "Recursive Spectral Clustering"
-        parent.categories = ["SlicerPhotogrammetry"]  # Adjust category if needed
+        parent.categories = ["SlicerMorph.Photogrammetry"]  # Adjust category if needed
         parent.dependencies = []
         parent.contributors = ["Oshane Thomas (SCRI)"]
         parent.helpText = """
@@ -28,10 +28,10 @@ spectral clustering approach with a Vision Transformer embedding.
 You can visualize clusters using UMAP in a single Plot view and copy the
 image files once you're satisfied with the results.
 """
-        parent.acknowledgementText = """
-Developed by Oshane Thomas, 2023.
-Inspired by code from HuggingFace Transformers, scikit-learn, and UM.
-"""
+        parent.acknowledgementText = """This module was developed with support from the National Science 
+        Foundation under grants DBI/2301405 and OAC/2118240 awarded to AMM at Seattle Children's Research Institute. 
+        """
+
 
 
 #
