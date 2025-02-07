@@ -18,8 +18,8 @@ class ClusterPhotos(ScriptedLoadableModule):
     """
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        parent.title = "Recursive Spectral Clustering"
-        parent.categories = ["SlicerMorph.Photogrammetry"]  # Adjust category if needed
+        parent.title = "ClusterPhotos"
+        parent.categories = ["SlicerMorph.Photogrammetry"]
         parent.dependencies = []
         parent.contributors = ["Oshane Thomas (SCRI)"]
         parent.helpText = """
