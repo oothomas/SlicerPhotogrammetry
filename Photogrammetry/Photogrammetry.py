@@ -73,7 +73,7 @@ class Photogrammetry(ScriptedLoadableModule):
         """
 
         # Suppress VTK warnings globally
-        vtk.vtkObject.GlobalWarningDisplayOff()
+        # vtk.vtkObject.GlobalWarningDisplayOff()
 
         slicer.photogrammetryLO = """
         <layout type="horizontal" split="true">
