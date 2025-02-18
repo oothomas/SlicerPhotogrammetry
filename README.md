@@ -1,6 +1,6 @@
 # Photogrammetry
-An extension to preprocess (masking) large collection photographs which then can be processed to construct 3D models with texture. 
-See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step up and optionally use Aruco markers to obtain physical scale of the object. 
+An extension to preprocess (mask) large collections of photographs which then can be processed to construct 3D models with texture. 
+See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step-up and optionally use Aruco markers to obtain the physical scale of the object. 
 
 ## Prerequisites
 ### Running on MorphoCloud
@@ -13,7 +13,7 @@ Currently only mode of operation supported is to launch the OpenDroneMap server 
 
 ## Sample Data
 
-https://app.box.com/shared/static/z8pypqqmel8pv4mp5k01philfrqep8xm.zip (320 photographs of a mountain beaver).
+https://app.box.com/shared/static/z8pypqqmel8pv4mp5k01philfrqep8xm.zip (320 photographs of a mountain beaver skull).
 
 # User Guide
 
@@ -43,7 +43,7 @@ This document will guide you through the **Photogrammetry** module's features, f
 ## 1. Overview
 
 **Photogrammetry** is a 3D Slicer module designed to help users transform large sets of photographs into a single 3D model using **photogrammetry**. The module integrates:
-- **[Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything)** for efficient masking of each image (removing background, highlighting your subject).
+- **[Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything)** for efficient masking of each image (removing background, highlighting your object).
 - **[WebODM / NodeODM](https://www.opendronemap.org/webodm/)** for aerial or close-range photogrammetry reconstruction.
 - **Additional** tools for generating Ground Control Point (GCP) data (optional but useful if you have known coordinates).
 
@@ -117,6 +117,11 @@ Once you've loaded a SAM model and chosen valid **Input** and **Output** directo
 - Select a set to see its images.
 - You can switch sets at any time each set's state (masked or not) is preserved.
 
+### Image List
+- The **Image List** table shows the filename and image number for each image in the selected image set.
+- You can click on each image in this to load and view the image, and it's related mask, if present.
+- Unmasked images appear red on this list but will change to green once masked.
+
 ---
 
 ## 6. Masking Workflows
@@ -133,13 +138,13 @@ Masking removes background and keeps only the foreground object. SlicerPhotogram
    - This removes any previously created masks for that set.
    - Puts you in a special ****global bounding box**** mode.
 3. Slicer will prompt you to **place a bounding box** that should encompass the object in every image.  
-   - Use the 2D slice viewers (**Red** and **Red2**) to **drag and resize** the ROI, ensuring the bounding region covers the entire object.  
+   - Use the 2D slice viewer (**Red**) to **drag and resize** the ROI, ensuring the bounding region covers the entire object.  
    - Switch between images with the **\<** and **\>** buttons to verify the bounding box is suitable for all angles.
 4. When satisfied, click **Finalize ROI and Mask All Images**.  
-   - SAM processes each image. If you checked **quarter** or **half** resolution (see [Mask Resolution](#mask-resolution-and-performance)), it speeds up processing at the cost of fine detail.  
+   - SAM processes each image. If you checked **quarter** or **half** resolution (see [Mask Resolution](#7-mask-resolution-and-performance)), it speeds up processing at the cost of fine detail.  
    - A **progress bar** updates you on how many images have been masked and provides an estimate of how long remains.
 
-Once batch masking completes, **all images** in that set will have a `.jpg` color output and `_mask.jpg` in the Output folder.  
+Once batch masking completes, **all images** in that set will have a masked `.jpg` color output and `_mask.jpg` binary mask in the Output folder.  
 
 ---
 
