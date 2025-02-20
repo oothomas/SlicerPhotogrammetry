@@ -12,8 +12,10 @@ Torch (will install the PyTorch extension, if not already installed).
 Currently only mode of operation supported is to launch the OpenDroneMap server locally. This requires having docker (and optionally Nvidia Container toolkit if you are planning to use a Nvidia GPU) installed and that the user running Slicer is authorized to launch docker images. 
 
 ## Sample Data
+Unprocessed photographs from [15 mountain beavers used in the Zhang and Maga, 2022 paper can be downloaded from here:](https://seattlechildrens1.box.com/v/PhotogrammetrySampleData)
 
-https://app.box.com/shared/static/z8pypqqmel8pv4mp5k01philfrqep8xm.zip (320 photographs of a mountain beaver skull).
+Use this link to download one specimen (UWBM 82409) used in the tutorials and other documentation: 
+https://app.box.com/shared/static/z8pypqqmel8pv4mp5k01philfrqep8xm.zip
 
 # User Guide
 
