@@ -4,12 +4,18 @@ See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstruc
 
 ## Prerequisites
 ### Running on MorphoCloud
-There are no prerequisites if you are using MorphoCloud to run this extension. All necessary libraries are preloaded. 
+There are no prerequisites if [you are using MorphoCloud On Demand](https://instances.morpho.cloud). All necessary libraries are preloaded. 
 
-### Running Locally
-Torch (will install the PyTorch extension, if not already installed). 
+### Running Locally on your computer
+We suggest using the MorphoCloud On Demand service to run the Photogrammetry extension. There are few reasons for that. First and foremost, GPUs provided (Nvidia A100) on MorphoCloud do really accelerate the workflow both for masking and 3D model reconstruction. The typical workflow from start to end using the provided sample data below would take about 60-70 minutes on the MorphoCloud. It will be significantly longer on your own computer, unless you have a very high end CPU with dozens of cores, and a powerful GPU.  Additionally, it will require you [to install the Docker container](https://docs.docker.com/engine/install/), and [the Nvidia container toolkit if you are using Nvidia GPUs](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on your computer, both of which requires having admin access to your computer. 
 
-Currently only mode of operation supported is to launch the OpenDroneMap server locally. This requires having docker (and optionally Nvidia Container toolkit if you are planning to use a Nvidia GPU) installed and that the user running Slicer is authorized to launch docker images. 
+Due to these complexities of installing Docker, Photogrammetry extension currently not provided as part of the Slicer Extension Catalogue for MacOS and Windows, only Linux is supported. But if you are an advanced user and successfully installed docker, you can manually install the extension by:
+
+1. Downloading this repository (use the green code button and choose Download ZIP). Alternatively, you can clone the repository via git.
+2. Uncompress the zip file on your desktop
+3. Drag and drop the SlicerPhotogrammetry (might also be called SlicerPhotogrammetry-main) folder to the Slicer application window, and choose "Add Python Scripted Modules to the Application" option from the dropdown menu of the popup message, and enable both Photogrammetry and ClusterPhotos.
+
+
 
 ## Sample Data
 Unprocessed photographs from [15 mountain beavers used in the Zhang and Maga, 2022 paper can be downloaded from here:](https://seattlechildrens1.box.com/v/PhotogrammetrySampleData)
