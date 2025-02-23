@@ -53,12 +53,12 @@ This document will guide you through the **Photogrammetry** module's features, f
 **Photogrammetry** is a 3D Slicer module designed to help users transform large sets of photographs into a single 3D model using **photogrammetry**. The module integrates:
 - **[Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything)** for efficient masking of each image (removing background, highlighting your object).
 - **[WebODM / NodeODM](https://www.opendronemap.org/webodm/)** for aerial or close-range photogrammetry reconstruction.
-- **Additional** tools for generating Ground Control Point (GCP) data (optional but useful if you have known coordinates).
+- **Additional** tools for generating Ground Control Point (GCP) data (optional, but necessary if you want your models to have accurate physical dimensions).
 
 ### What the Module Allows You To Do
-1. **Load a powerful segmentation model (SAM)** directly in 3D Slicer.  
+1. **Run Segment Anything Model (SAM)** conveniently in 3D Slicer.  
 2. **Batch-mask or individually mask** sets of images using bounding boxes and optional inclusion/exclusion points to guide segmentation.  
-3. **Generate GCP data** (if you have marker coordinates) to refine reconstruction.  
+3. **Generate GCP data** (if you have marker coordinates) to obtain accurate physical dimensions of the specimens.  
 4. **Interface with WebODM** to launch reconstructions locally or on a remote node.  
 5. **Download the final 3D model** back into Slicer for further inspection and visualization.
 
