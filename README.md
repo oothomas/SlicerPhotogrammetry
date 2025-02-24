@@ -15,7 +15,9 @@ Due to these complexities of installing Docker, Photogrammetry extension current
 
 1. Downloading this repository (use the green code button and choose Download ZIP). Alternatively, you can clone the repository via git.
 2. Uncompress the zip file on your desktop
-3. Drag and drop the SlicerPhotogrammetry (might also be called SlicerPhotogrammetry-main) folder to the Slicer application window, and choose "Add Python Scripted Modules to the Application" option from the dropdown menu of the popup message, and enable both Photogrammetry and ClusterPhotos.
+3. Start 3D Slicer and install the PyTorch and SlicerMorph extensions from the Extension Catalogue. Restart Slicer for changes to take effect. 
+4. Drag and drop the SlicerPhotogrammetry (might also be called SlicerPhotogrammetry-main) folder to the Slicer application window, and choose "Add Python Scripted Modules to the Application" option from the dropdown menu of the popup message, and enable both Photogrammetry and ClusterPhotos.
+5. Switch to Photogrammetry module wait for necessary libraries to be downloaded or installed. 
 
 
 
