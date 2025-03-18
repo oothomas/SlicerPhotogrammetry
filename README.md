@@ -1,8 +1,9 @@
-# Photogrammetry
+# SlicerMorph Photogrammetry
 <img src="Photogrammetry/Resources/Icons/Photogrammetry.png">
 
 An extension to preprocess (mask) large collections of photographs which then can be processed to construct 3D models with texture. 
-See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step-up and optionally use Aruco markers to obtain the physical scale of the object. 
+* See [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338) on how to take pictures of specimens using a low-cost step-up and optionally use Aruco markers to obtain the physical scale of the object.
+* The [new preprint by Thomas, Zhang and Maga](https://www.biorxiv.org/content/10.1101/2025.03.07.641939v1) discusses the new SlicerMorph Photogrammery extension and compares the output from the extension to previous study. 
 
 ## Prerequisites
 ### Running on MorphoCloud
