@@ -109,7 +109,7 @@ Upon first opening the **Photogrammetry** module, you will see a dropdown labele
      - etc.
 Keeping similar orientations in sets help with the workflow associated with masking the background (see below).
 
-2. **Output Folder:** A separate folder you create for masked images and where final results will be placed.
+2. **Output Folder:** A separate folder you create for masked images and where final results will be placed. **NOTE:** Do NOT place the output folder inside the Input Folder. Output folder has to reside outside of the Input folder structure, which we recursively process.
 
 Use the **Directory** pickers in the module UI to select these paths. SlicerPhotogrammetry stores your selection so you don't have to re-pick them every time. Just remember to change them for each new reconstruction project.
 
