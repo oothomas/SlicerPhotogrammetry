@@ -311,7 +311,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         tab2Widget.setLayout(tab2Layout)
 
         self.mainTabWidget.addTab(tab1Widget, "Image Masking")
-        self.mainTabWidget.addTab(tab2Widget, "WebODM")
+        self.mainTabWidget.addTab(tab2Widget, "NodeODM")
 
         #
         # (A) Main Collapsible: Import Image Sets
@@ -527,7 +527,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         manageWODMFormLayout = qt.QFormLayout(manageWODMCollapsibleButton)
 
         buttonRow = qt.QHBoxLayout()
-        self.launchWebODMButton = qt.QPushButton("Launch WebODM")
+        self.launchWebODMButton = qt.QPushButton("Launch NodeODM")
         self.stopWebODMButton = qt.QPushButton("Stop Node")
 
         buttonRow.addWidget(self.launchWebODMButton)
@@ -683,7 +683,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         )
         webodmTaskFormLayout.addRow("name:", self.datasetNameLineEdit)
 
-        self.launchWebODMTaskButton = qt.QPushButton("Run WebODM Task With Selected Parameters (non-blocking)")
+        self.launchWebODMTaskButton = qt.QPushButton("Run NodeODM Task With Selected Parameters (non-blocking)")
         webodmTaskFormLayout.addWidget(self.launchWebODMTaskButton)
         self.launchWebODMTaskButton.setEnabled(False)
         self.launchWebODMTaskButton.connect('clicked(bool)', self.onRunWebODMTask)
@@ -696,7 +696,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
         self.stopMonitoringButton.setEnabled(False)
         webodmTaskFormLayout.addWidget(self.stopMonitoringButton)
 
-        self.importModelButton = qt.QPushButton("Import WebODM Model")
+        self.importModelButton = qt.QPushButton("Import Reconstructed Model")
         tab2Layout.addWidget(self.importModelButton)
 
         tab2Layout.addStretch(1)
@@ -2558,7 +2558,7 @@ class PhotogrammetryWidget(ScriptedLoadableModuleWidget):
             "Proceed?"
         )
         if not proceed:
-            slicer.util.infoDisplay("Launch WebODM canceled by user.")
+            slicer.util.infoDisplay("Launch NodeODM canceled by user.")
             return
 
         try:
@@ -2953,7 +2953,10 @@ class SlicerWebODMManager:
             dataset_name = "SlicerReconstruction"
         params["name"] = dataset_name
 
-        shortTaskName = self.widget.generateShortTaskName("SlicerReconstruction", params)
+        prefix = self.widget.datasetNameLineEdit.text.strip() or "SlicerReconstruction"
+        shortTaskName = self.widget.generateShortTaskName(prefix, params)
+
+        # shortTaskName = self.widget.generateShortTaskName("SlicerReconstruction", params)
         slicer.util.infoDisplay("Creating WebODM Task (non-blocking). Upload may take time...")
 
         try:
