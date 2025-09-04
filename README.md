@@ -2,7 +2,7 @@
 <img src="Photogrammetry/Resources/Icons/Photogrammetry.png" width="300">
 
 ## Citing Photogrammetry
-If you end up using the Photogrammetry extension in context of a scientific product (conference abstract, preprint, journal paper etc), please cite **[Thomas, Zhang and Maga. 2025. Biology Open](https://journals.biologists.com/bio/article/doi/10.1242/bio.062126/368790/SlicerMorph-photogrammetry-An-open-source)**.  
+If you end up using the Photogrammetry extension in context of a scientific product (conference abstract, preprint, journal paper etc), please cite **[Thomas OO, Zhang C, Maga AM. 2025. SlicerMorph photogrammetry: an open-source photogrammetry workflow for reconstructing 3D models. Biol Open; 14 (8): bio062126. doi: https://doi.org/10.1242/bio.062126](https://journals.biologists.com/bio/article/doi/10.1242/bio.062126/368790/SlicerMorph-photogrammetry-An-open-source)**.  
 
 If you need details about how to take pictures of specimens using a low-cost step-up and optionally use Aruco markers to obtain the physical scale of the object, see [Zhang and Maga (2023) An Open-Source Photogrammetry Workflow for Reconstructing 3D Models](https://academic.oup.com/iob/article/5/1/obad024/7221338).
 
