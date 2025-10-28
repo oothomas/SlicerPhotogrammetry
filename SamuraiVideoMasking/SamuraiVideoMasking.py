@@ -13,6 +13,14 @@ Features
       - Verify Installation
       - Open Support Folder
   ? Live log console + status line
+- Collapsible "Video Prep" with:
+  ? Choose source video (.mov/.mp4)
+  ? Auto-compute target .mp4 path (same stem, .mp4)
+  ? Auto-compute frames folder (same stem)
+  ? "Load Video" button:
+      - If .mov -> convert to .mp4 (OpenCV; video only, no audio)
+      - Create frames folder (or prompt if exists)
+      - Extract all frames (BGR->JPEG files) into that folder
 - Uses PyTorchUtils to ensure Torch (prompt + restart if needed)
 - Clones/updates repo, installs SAM2 (editable), installs base deps (no torch/torchvision, no matplotlib pin)
 """
@@ -23,6 +31,7 @@ import platform
 import subprocess
 import shlex
 import time
+import shutil
 from pathlib import Path
 
 import qt
@@ -43,8 +52,8 @@ class SamuraiVideoMasking(ScriptedLoadableModule):
         parent.dependencies = []
         parent.contributors = ["Oshane Thomas (SCRI)"]
         parent.helpText = (
-            "Clone and set up the SAMURAI repo for use in this module. "
-            "Everything runs on the main thread (UI may freeze during setup)."
+            "Clone and set up the SAMURAI repo for use in this module, and prepare a video for masking "
+            "(optional MOV-MP4 conversion and frame extraction). Everything runs on the main thread."
         )
         parent.acknowledgementText = (
             "This module was developed with support from the National Science "
@@ -59,6 +68,9 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
     SETTINGS_KEY = "SamuraiVideoMasking"
     SETTINGS_INSTALLED = f"{SETTINGS_KEY}/installed"
     SETTINGS_REPO_PATH = f"{SETTINGS_KEY}/repoPath"
+    SETTINGS_LAST_VIDEO = f"{SETTINGS_KEY}/lastVideo"
+    SETTINGS_LAST_MP4 = f"{SETTINGS_KEY}/lastMp4"
+    SETTINGS_LAST_FRAMES = f"{SETTINGS_KEY}/lastFramesDir"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,6 +91,9 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         super().setup()
         self.logic = SamuraiVideoMaskingLogic()
 
+        # ------------------------------
+        # Collapsible: SAMURAI Setup
+        # ------------------------------
         box = ctk.ctkCollapsibleButton()
         box.text = "SAMURAI Setup"
         self.layout.addWidget(box)
@@ -126,7 +141,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.verifyBtn.clicked.connect(self.onVerifyClicked)
         self.openFolderBtn.clicked.connect(self.onOpenFolderClicked)
 
-        # Ensure Support/ and reload saved repo path
+        # Persisted destination path
         self.supportDir().mkdir(parents=True, exist_ok=True)
         s = qt.QSettings()
         if s.contains(self.SETTINGS_REPO_PATH):
@@ -136,14 +151,60 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         self._log("Ready. Click 'Configure SAMURAI (Blocking)' to set up, or 'Verify Installation' to test imports.")
         self._envHints()
+
+        # ------------------------------
+        # Collapsible: Video Prep
+        # ------------------------------
+        vbox = ctk.ctkCollapsibleButton()
+        vbox.text = "Video Prep (MOV-MP4 + Frame Extraction)"
+        self.layout.addWidget(vbox)
+        vform = qt.QFormLayout(vbox)
+
+        # Source video path
+        vrow1 = qt.QHBoxLayout()
+        self.videoPathEdit = qt.QLineEdit()
+        self.videoPathEdit.setPlaceholderText("Choose a .mov or .mp4 file.")
+        self.videoBrowseBtn = qt.QPushButton("Browse")
+        vrow1.addWidget(self.videoPathEdit, 1)
+        vrow1.addWidget(self.videoBrowseBtn)
+        vform.addRow("Source video:", vrow1)
+
+        # Target mp4 path (same stem, .mp4)
+        self.mp4PathEdit = qt.QLineEdit()
+        self.mp4PathEdit.readOnly = True
+        vform.addRow("Target .mp4:", self.mp4PathEdit)
+
+        # Frames directory (same stem)
+        self.framesDirEdit = qt.QLineEdit()
+        self.framesDirEdit.readOnly = True
+        vform.addRow("Frames folder:", self.framesDirEdit)
+
+        # Load/convert/extract button
+        self.loadVideoBtn = qt.QPushButton("Load Video (Convert if MOV, then Extract Frames)")
+        vform.addRow(self.loadVideoBtn)
+
+        # Wire video prep signals
+        self.videoBrowseBtn.clicked.connect(self.onBrowseVideo)
+        self.loadVideoBtn.clicked.connect(self.onLoadVideo)
+
+        # Restore last paths if any
+        if s.contains(self.SETTINGS_LAST_VIDEO):
+            self.videoPathEdit.setText(s.value(self.SETTINGS_LAST_VIDEO))
+        self._computeDerivedVideoPaths()
+        if s.contains(self.SETTINGS_LAST_MP4):
+            self.mp4PathEdit.setText(s.value(self.SETTINGS_LAST_MP4))
+        if s.contains(self.SETTINGS_LAST_FRAMES):
+            self.framesDirEdit.setText(s.value(self.SETTINGS_LAST_FRAMES))
+
+        # Stretch
         self.layout.addStretch(1)
 
     # --- Helpers ---
     def _setBusy(self, busy: bool):
-        self.configureBtn.enabled = not busy
-        self.verifyBtn.enabled = not busy
-        self.openFolderBtn.enabled = not busy
-        self.urlEdit.enabled = not busy
+        # Both sections share the same busy toggle
+        for w in (self.configureBtn, self.verifyBtn, self.openFolderBtn,
+                  self.videoBrowseBtn, self.loadVideoBtn, self.urlEdit):
+            w.setEnabled(not busy)
         self.statusLabel.setText(f"Status: {'Working...' if busy else 'Idle'}")
         self.statusLabel.setStyleSheet("color: #f5c542;" if busy else "color: #BBB;")
         slicer.app.processEvents()
@@ -225,7 +286,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
 
         return True
 
-    # --- Actions ---
+    # --- Actions: Setup ---
     def onOpenFolderClicked(self):
         qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(str(self.supportDir())))
 
@@ -281,7 +342,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                 ["git", "-C", str(repo_dir), "submodule", "update", "--init", "--recursive"], self._log
             )
 
-        # 3) Install SAM2 (editable) on main thread
+        # 3) Install SAM2 (editable)
         sam2_dir = repo_dir / "sam2"
         if sam2_dir.exists():
             self._log("Installing SAM2 (editable)...")
@@ -290,15 +351,6 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                 self._log(out.strip())
             if not ok:
                 self._log("WARNING: SAM2 install (editable) reported failure.")
-
-            # Keep things lean: skip notebooks extras by default
-            # Uncomment if you truly need the Jupyter stack inside Slicer.
-            # self._log("Installing SAM2 extras [notebooks] (editable)...")
-            # ok, out = self._pip(f'-e "{sam2_dir}[notebooks]"')
-            # if out:
-            #     self._log(out.strip())
-            # if not ok:
-            #     self._log("WARNING: SAM2 [notebooks] extras failed to install.")
         else:
             self._log("WARNING: 'sam2' directory not found; skipping SAM2 install.")
 
@@ -351,8 +403,7 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
     def onVerifyClicked(self):
         self._setBusy(True)
         try:
-            self._log("Verifying SAMURAI environment imports?")
-
+            self._log("Verifying SAMURAI environment imports")
             checks = [
                 ("sam2", "import sam2 as m; getattr(m, '__version__', 'OK')"),
                 ("torch", "import torch as m; m.__version__"),
@@ -368,7 +419,6 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                 ("jpeg4py", "import jpeg4py as m; getattr(m, '__version__', 'OK')"),
                 ("loguru", "import loguru as m; getattr(m, '__version__', 'OK')"),
             ]
-
             ok_all = True
             for label, code in checks:
                 try:
@@ -379,13 +429,197 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                 except Exception as e:
                     ok_all = False
                     self._log(f"FAIL: {label} import error -> {e}")
-
             if ok_all:
                 self._log("Verification passed. All core imports succeeded.")
             else:
                 self._log("Verification finished with errors. See failures above.")
         finally:
             self._setBusy(False)
+
+    # --- Video Prep UI events ---
+    def onBrowseVideo(self):
+        startDir = os.path.dirname(self.videoPathEdit.text) if self.videoPathEdit.text else str(Path.home())
+        filePath = qt.QFileDialog.getOpenFileName(
+            slicer.util.mainWindow(),
+            "Select video",
+            startDir,
+            "Video files (*.mov *.MOV *.mp4 *.MP4);;All files (*)"
+        )
+        if not filePath:
+            return
+        self.videoPathEdit.setText(filePath)
+        self._computeDerivedVideoPaths()
+        # save last selection
+        s = qt.QSettings()
+        s.setValue(self.SETTINGS_LAST_VIDEO, filePath)
+        s.setValue(self.SETTINGS_LAST_MP4, self.mp4PathEdit.text)
+        s.setValue(self.SETTINGS_LAST_FRAMES, self.framesDirEdit.text)
+
+    def _computeDerivedVideoPaths(self):
+        src = self.videoPathEdit.text.strip()
+        if not src:
+            self.mp4PathEdit.setText("")
+        else:
+            p = Path(src)
+            stem = p.stem
+            parent = p.parent
+            # target mp4 is same stem with .mp4 extension
+            self.mp4PathEdit.setText(str(parent / f"{stem}.mp4"))
+            # frames folder is same stem
+            self.framesDirEdit.setText(str(parent / stem))
+
+    def onLoadVideo(self):
+        src = self.videoPathEdit.text.strip()
+        if not src:
+            slicer.util.messageBox("Please choose a source video first.")
+            return
+        p = Path(src)
+        if not p.exists():
+            slicer.util.messageBox(f"Video not found:\n{src}")
+            return
+
+        target_mp4 = Path(self.mp4PathEdit.text.strip() or (str(p.with_suffix(".mp4"))))
+        frames_dir = Path(self.framesDirEdit.text.strip() or (str(p.parent / p.stem)))
+
+        # Confirm long-running blocking work
+        if not slicer.util.confirmOkCancelDisplay(
+            "Video prep will run on the main thread and may freeze the UI.\nProceed?",
+            "Blocking Video Prep"
+        ):
+            return
+
+        self._setBusy(True)
+        try:
+            # 1) Convert MOV?MP4 if needed
+            if p.suffix.lower() == ".mov":
+                self._log(f"Converting MOV - MP4:\n{p}  -  {target_mp4}")
+                self._mov_to_mp4_blocking(str(p), str(target_mp4))
+                self._log("Conversion complete.")
+            else:
+                self._log(f"Using MP4 input: {p if p.suffix.lower() == '.mp4' else p} ? {target_mp4}")
+                # If the source is already .mp4, ensure target path reflects it
+                if p.suffix.lower() == ".mp4":
+                    target_mp4 = p
+
+            # 2) Prepare frames directory (prompt if exists)
+            if frames_dir.exists():
+                if slicer.util.confirmYesNoDisplay(
+                    f"Frames folder exists:\n{frames_dir}\n\nDelete its contents and re-extract?",
+                    "Frames folder exists"
+                ):
+                    self._log(f"Cleaning existing frames folder: {frames_dir}")
+                    self._safe_empty_dir(frames_dir)
+                else:
+                    # Keep existing; append timestamp to avoid clobbering
+                    ts = time.strftime("%Y%m%d-%H%M%S")
+                    frames_dir = frames_dir.parent / f"{frames_dir.name}_{ts}"
+                    self._log(f"Using new frames folder instead: {frames_dir}")
+
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            self.framesDirEdit.setText(str(frames_dir))
+
+            # 3) Extract frames (JPEG)
+            self._log(f"Extracting frames - {frames_dir}")
+            n = self._extract_frames_blocking(str(target_mp4), str(frames_dir))
+            self._log(f"Done. Extracted {n} frames.")
+
+            # Save last paths
+            s = qt.QSettings()
+            s.setValue(self.SETTINGS_LAST_VIDEO, str(p))
+            s.setValue(self.SETTINGS_LAST_MP4, str(target_mp4))
+            s.setValue(self.SETTINGS_LAST_FRAMES, str(frames_dir))
+
+        except Exception as e:
+            self._log(f"Video prep failed: {e}")
+            slicer.util.errorDisplay(f"Video prep failed:\n{e}")
+        finally:
+            self._setBusy(False)
+
+    # --- Video helpers (blocking; main thread) ---
+    def _mov_to_mp4_blocking(self, mov_path: str, mp4_path: str):
+        """
+        Convert .mov -> .mp4 using OpenCV. Video only (no audio),
+        same FPS and resolution as source.
+        """
+        # Import locally to avoid hard module requirements on import-time
+        import cv2
+
+        cap = cv2.VideoCapture(mov_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open: {mov_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(mp4_path, fourcc, fps, (width, height))
+        if not out.isOpened():
+            cap.release()
+            raise RuntimeError(f"Could not create MP4 writer at: {mp4_path}")
+
+        frame_idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            out.write(frame)
+            frame_idx += 1
+            if frame_idx % 250 == 0:
+                self._log(f"Converted {frame_idx} frames.")
+                slicer.app.processEvents()
+
+        cap.release()
+        out.release()
+
+    def _extract_frames_blocking(self, video_path: str, frames_dir: str) -> int:
+        """
+        Extract all frames from video_path to frames_dir as JPEG:
+        frame_0000001.jpg, frame_0000002.jpg, ...
+        Returns number of frames written.
+        """
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open: {video_path}")
+
+        # Attempt to estimate total frames for nicer logs
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
+        idx = 0
+        wrote = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            idx += 1
+            fname = f"frame_{idx:07d}.jpg"
+            fpath = str(Path(frames_dir) / fname)
+            # High-quality JPEG (95)
+            cv2.imwrite(fpath, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            wrote += 1
+            if wrote % 250 == 0:
+                if total:
+                    self._log(f"Extracted {wrote}/{total} frames.")
+                else:
+                    self._log(f"Extracted {wrote} frames.")
+                slicer.app.processEvents()
+
+        cap.release()
+        return wrote
+
+    def _safe_empty_dir(self, path: Path):
+        if not path.exists():
+            return
+        # Remove all files/dirs inside but keep the folder itself
+        for child in path.iterdir():
+            try:
+                if child.is_file() or child.is_symlink():
+                    child.unlink(missing_ok=True)
+                else:
+                    shutil.rmtree(child)
+            except Exception as e:
+                self._log(f"WARNING: Could not remove {child}: {e}")
 
 
 # -------------------------
