@@ -92,6 +92,21 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         # Early log buffering before logEdit exists
         self._earlyLogs = []
 
+        # --- Stage 1 (key-frame thinning) UI + results ---
+        self.kfSlider = None
+        self.kfRatioLabel = None
+        self.kfRunBtn = None
+        self.kfProgress = None
+
+        # Unmasked ? masked cache (aligned 1:1 to framesBuffer)
+        self.framesMaskedBuffer = None  # list[np.ndarray BGR], same length as framesBuffer
+
+        # Stage-1 results (unmasked & masked)
+        self.keyFramesBuffer = None  # list[np.ndarray BGR] (subset of framesBuffer)
+        self.keyFrameIndices = None  # list[int] indices into original frames
+        self.keyMasksBuffer = None  # dict[int -> mask_like] remapped 0..K-1
+        self.keyFramesMaskedBuffer = None  # list[np.ndarray BGR] (subset of framesMaskedBuffer)
+
     # ---------- Paths ----------
     def moduleDir(self) -> Path:
         return Path(os.path.dirname(slicer.modules.samuraivideomasking.path))
@@ -258,7 +273,6 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.logEdit.setMinimumHeight(240)
         form.addRow("Log:", self.logEdit)
 
-        # Flush early logs captured before logEdit existed
         if getattr(self, "_earlyLogs", None):
             for ts, msg in self._earlyLogs:
                 self.logEdit.appendPlainText(f"[{ts}] {msg}")
@@ -275,7 +289,6 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         self.verifyBtn.clicked.connect(self.onVerifyClicked)
         self.openFolderBtn.clicked.connect(self.onOpenFolderClicked)
 
-        # Persisted destination path
         self.supportDir().mkdir(parents=True, exist_ok=True)
         s = qt.QSettings()
         if s.contains(self.SETTINGS_REPO_PATH):
@@ -283,7 +296,8 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             if saved:
                 self.destPathEdit.setText(saved)
 
-        self._log("Click 'Configure SAMURAI' to clone/install everything (cu126). Then 'Verify Installation' to populate devices.")
+        self._log(
+            "Click 'Configure SAMURAI' to clone/install everything (cu126). Then 'Verify Installation' to populate devices.")
 
         # === Video Prep ===
         vbox = ctk.ctkCollapsibleButton()
@@ -378,6 +392,71 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                 self.trackBtn.setEnabled(True)
             except Exception:
                 pass
+
+        # === Key-frame Filtering (Stage 1) ===
+        kbox = ctk.ctkCollapsibleButton()
+        kbox.text = "Key-frame Filtering"
+        self.layout.addWidget(kbox)
+        kform = qt.QFormLayout(kbox)
+
+        krow1 = qt.QHBoxLayout()
+        self.kfSlider = ctk.ctkDoubleSlider()
+        self.kfSlider.orientation = qt.Qt.Horizontal
+        self.kfSlider.minimum = 0.10
+        self.kfSlider.maximum = 1.00
+        self.kfSlider.singleStep = 0.05
+        self.kfSlider.pageStep = 0.10
+        self.kfSlider.value = 0.80
+        self.kfRatioLabel = qt.QLabel("0.80")
+        krow1.addWidget(self.kfSlider, 1)
+        krow1.addWidget(self.kfRatioLabel)
+        kform.addRow("Match ratio (keep new key-frame if smaller):", krow1)
+
+        self.kfRunBtn = qt.QPushButton("Filter Keyframes")
+        self.kfRunBtn.setToolTip("Run ORB/BFMatcher-based thinning over loaded frames.")
+        kform.addRow(self.kfRunBtn)
+
+        self.kfProgress = qt.QProgressBar()
+        self.kfProgress.setVisible(False)
+        kform.addRow("Progress:", self.kfProgress)
+
+        self.kfSlider.valueChanged.connect(self._onKeyframeRatioChanged)
+        self.kfRunBtn.clicked.connect(self.onFilterKeyframesClicked)
+
+        # Key-frame filtering is disabled until masks exist
+        self._setKeyframeFilterControlsEnabled(False)
+
+        # === Save Outputs (NEW) ===
+        sbox = ctk.ctkCollapsibleButton()
+        sbox.text = "Save Outputs"
+        self.layout.addWidget(sbox)
+        sform = qt.QFormLayout(sbox)
+
+        # Folder picker
+        self.saveRootDirButton = ctk.ctkDirectoryButton()
+        self.saveRootDirButton.caption = "Choose save folder?"
+        self.saveRootDirPath = ""
+        sform.addRow("Save to folder:", self.saveRootDirButton)
+
+        # Status + action
+        srow = qt.QHBoxLayout()
+        self.saveStatusLabel = qt.QLabel("Waiting for SAMURAI masks?")
+        self.saveRunBtn = qt.QPushButton("Save")
+        self.saveRunBtn.setEnabled(False)
+        srow.addWidget(self.saveStatusLabel, 1)
+        srow.addWidget(self.saveRunBtn, 0)
+        sform.addRow(srow)
+
+        self.saveProgress = qt.QProgressBar()
+        self.saveProgress.setVisible(False)
+        sform.addRow("Progress:", self.saveProgress)
+
+        # Wire save events
+        self.saveRootDirButton.directoryChanged.connect(self.onBrowseSaveFolder)
+        self.saveRunBtn.clicked.connect(self.onSaveOutputsClicked)
+
+        # Save UI disabled until SAMURAI masking completes
+        self._setSaveControlsEnabled(browse_enabled=False, save_enabled=False)
 
         self.layout.addStretch(1)
 
@@ -850,6 +929,21 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
         if not p.exists():
             slicer.util.messageBox(f"Frames folder does not exist:\n{frames_dir}")
             return
+
+        # Any previously computed masks/results are stale
+        self.masksBuffer = None
+        self.framesMaskedBuffer = None
+        self.keyFramesBuffer = None
+        self.keyFramesMaskedBuffer = None
+        self.keyFrameIndices = None
+        self.keyMasksBuffer = None
+
+        # Disable key-frame filtering and Save UI until SAMURAI re-runs
+        self._setKeyframeFilterControlsEnabled(False)
+        self._setSaveControlsEnabled(browse_enabled=False, save_enabled=False)
+        self.saveStatusLabel.setText("Waiting for SAMURAI masks?")
+        self.saveRootDirPath = ""
+
         self._setBusy(True)
         try:
             self.framesBuffer = self._load_frames_from_folder(p)
@@ -1077,7 +1171,6 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             slicer.util.messageBox("Please finalize an ROI first.")
             return
 
-        # Ensure libs visible before any torch import
         self._prepare_cuda_runtime_visibility(log=False)
 
         device = self._comboText(self.deviceCombo).strip()
@@ -1099,8 +1192,8 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             return
 
         if not slicer.util.confirmOkCancelDisplay(
-            "Tracking will run on the main thread and may freeze the UI.\nProceed?",
-            "Blocking Tracking"
+                "Tracking will run on the main thread and may freeze the UI.\nProceed?",
+                "Blocking Tracking"
         ):
             return
 
@@ -1127,8 +1220,8 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             self._log(f"Running SAMURAI tracking on {n_frames} frames?")
             masks_map = self._run_tracking(mp4_path, self.bbox_xywh, predictor, n_frames, device)
 
-            out_dir = Path(frames_dir + "_masks")
-            out_dir.mkdir(parents=True, exist_ok=True)
+            # Keep masks ONLY in memory
+            mem_masks = {}
             saved = 0
             for fid, mask_list in masks_map.items():
                 import numpy as np
@@ -1142,24 +1235,19 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                     agg = m if agg is None else (agg | m)
                 if agg is None:
                     continue
-                fpath = str(out_dir / f"mask_{fid+1:07d}.png")
-                self._save_png_mask(fpath, (agg*255).astype("uint8"))
+                mem_masks[fid] = (agg * 255).astype("uint8")
                 saved += 1
-                if saved % 100 == 0:
-                    self._log(f"Saved {saved} masks?")
-                    slicer.app.processEvents()
 
-            self._log(f"Tracking complete. Saved {saved} masks to {out_dir}")
-            if self.keepInMemCheck.isChecked():
-                try:
-                    import numpy as np
-                    self.masksBuffer = {
-                        fid: ((self._stack_or_any(mask_list)) > 0).astype(bool)
-                        for fid, mask_list in masks_map.items()
-                    }
-                    self._log(f"In-memory masks available for {len(self.masksBuffer)} frames.")
-                except Exception as e:
-                    self._log(f"WARNING: Could not keep masks in memory: {e}")
+            self.masksBuffer = mem_masks
+            self._log(f"Tracking complete. {saved} masks are available in memory (no files were written).")
+
+            # Enable key-frame filtering and Save browse (Save button waits for folder selection)
+            self._setKeyframeFilterControlsEnabled(True)
+            self._setSaveControlsEnabled(browse_enabled=True, save_enabled=bool(self.saveRootDirPath))
+            if not self.saveRootDirPath:
+                self.saveStatusLabel.setText("Select a save folder?")
+            else:
+                self.saveStatusLabel.setText(f"Ready to save to: {self.saveRootDirPath}")
 
         except Exception as e:
             self._log(f"Tracking failed: {e}")
@@ -1336,6 +1424,608 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                     "Neither 'decord' nor 'av' could be installed. "
                     "Please check networking / wheel availability and try Configure again."
                 ) from ee
+
+    def _onKeyframeRatioChanged(self, val):
+        try:
+            self.kfRatioLabel.setText(f"{float(val):.2f}")
+        except Exception:
+            self.kfRatioLabel.setText(str(val))
+
+    def detect_keyframes(self, frames, masks, ratio=0.8):
+        """
+        ORB/BFMatcher-based key-frame detection (faithful to the provided prototype),
+        with safe mask handling and UI progress updates via self.kfProgress.
+        Returns (keyframes_list, kept_indices_list).
+        """
+        import numpy as np
+        import cv2
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            torch = None
+        try:
+            from tqdm import tqdm
+        except Exception:
+            # Fallback shim if tqdm isn't available
+            def tqdm(it, total=None, desc=None, leave=None):
+                return it
+
+        if not frames:
+            return [], []
+
+        def _mask(idx):
+            mask_entry = None
+            try:
+                mask_entry = masks.get(idx) if masks is not None else None
+            except Exception:
+                mask_entry = None
+
+            if mask_entry is None:
+                return np.zeros(frames[0].shape[:2], np.uint8)
+
+            def _as_numpy(tensor_like):
+                if tensor_like is None:
+                    return None
+                # torch tensor
+                if torch is not None:
+                    try:
+                        import torch as _t
+                        if isinstance(tensor_like, _t.Tensor):
+                            return tensor_like.detach().cpu().numpy()
+                    except Exception:
+                        pass
+                # dict with segmentation-like payloads
+                if isinstance(tensor_like, dict):
+                    for key in ("segmentation", "mask", "masks"):
+                        if key in tensor_like:
+                            return _as_numpy(tensor_like[key])
+                    return None
+                # list/tuple: take first convertible
+                if isinstance(tensor_like, (list, tuple)):
+                    for item in tensor_like:
+                        arr = _as_numpy(item)
+                        if arr is not None:
+                            return arr
+                    return None
+                # numpy-ish fallback
+                try:
+                    return np.asarray(tensor_like)
+                except Exception:
+                    return None
+
+            mask_np = _as_numpy(mask_entry)
+            if mask_np is None:
+                return np.zeros(frames[0].shape[:2], np.uint8)
+
+            # Match prototype?s dimensional handling
+            if mask_np.ndim == 4:
+                mask_np = mask_np[0, 0]
+            elif mask_np.ndim == 3:
+                mask_np = mask_np[0]
+
+            return (mask_np > 0.5).astype(np.uint8)
+
+        orb = cv2.ORB_create()
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, True)
+        kf, kidx = [frames[0]], [0]
+        ref_kp, ref_des = orb.detectAndCompute(frames[0], _mask(0))
+
+        # Prepare UI progress
+        total_iters = max(0, len(frames) - 1)
+        if self.kfProgress:
+            self.kfProgress.setVisible(True)
+            self.kfProgress.setRange(0, total_iters)
+            self.kfProgress.setValue(0)
+            slicer.app.processEvents()
+
+        iterable = enumerate(frames[1:], 1)
+        if len(frames) > 1:
+            iterable = tqdm(iterable, total=len(frames) - 1, desc="Key-frame thinning", leave=False)
+
+        progressed = 0
+        for idx, fr in iterable:
+            kp, des = orb.detectAndCompute(fr, _mask(idx))
+            if not (ref_des is not None and des is not None and ref_kp):
+                kf.append(fr)
+                kidx.append(idx)
+                ref_kp, ref_des = kp, des
+            else:
+                matches = bf.match(ref_des, des)
+                # identical criterion to prototype
+                if len(matches) / len(ref_kp) < ratio:
+                    kf.append(fr)
+                    kidx.append(idx)
+                    ref_kp, ref_des = kp, des
+
+            progressed += 1
+            if self.kfProgress:
+                self.kfProgress.setValue(progressed)
+                slicer.app.processEvents()
+
+        return kf, kidx
+
+    def onFilterKeyframesClicked(self):
+        # Preconditions
+        if not self.framesBuffer or len(self.framesBuffer) == 0:
+            slicer.util.messageBox("No frames are loaded. Use 'Load Frames From Folder' first.")
+            return
+        if not isinstance(self.masksBuffer, dict) or len(self.masksBuffer) == 0:
+            slicer.util.messageBox("Masks are not available yet. Run 'Run SAMURAI Masking' first.")
+            return
+
+        try:
+            ratio = float(self.kfSlider.value)
+        except Exception:
+            ratio = 0.8
+
+        # Build masked frames with progress/cancel (uses self.masksBuffer in memory)
+        try:
+            self._buildMaskedFramesBuffer()
+        except Exception as e:
+            self._log(f"Failed to build masked frames: {e}")
+            slicer.util.errorDisplay(f"Failed to build masked frames:\n{e}")
+            return
+
+        self._setBusy(True)
+        try:
+            masked_frames = self.framesMaskedBuffer
+            masks = self.masksBuffer
+
+            self._log(f"Starting key-frame filtering on MASKED frames (ratio={ratio:.2f}, N={len(masked_frames)})?")
+            kf, kidx = self.detect_keyframes(masked_frames, masks, ratio=ratio)
+
+            # Store Stage-1 results (CURRENT)
+            self.keyFrameIndices = list(kidx)
+            self.keyFramesMaskedBuffer = [masked_frames[i] for i in kidx]
+            self.keyFramesBuffer = [self.framesBuffer[i] for i in kidx]
+
+            kept_masks = {}
+            if isinstance(self.masksBuffer, dict):
+                for new_i, orig_i in enumerate(kidx):
+                    kept_masks[new_i] = self.masksBuffer.get(orig_i, None)
+            self.keyMasksBuffer = kept_masks
+
+            kept = len(kidx)
+            total = len(masked_frames)
+            pct = (kept / total * 100.0) if total > 0 else 0.0
+            self._log(f"Key-frame filtering complete on MASKED frames: kept {kept}/{total} ({pct:.1f}%). "
+                      f"indices={self.keyFrameIndices[:12]}{'?' if kept > 12 else ''}")
+
+            slicer.util.infoDisplay(
+                f"Key-frame filtering (masked) complete.\nKept {kept} of {total} frames ({pct:.1f}%).",
+                autoCloseMsec=3500
+            )
+        except Exception as e:
+            self._log(f"Key-frame filtering failed: {e}")
+            slicer.util.errorDisplay(f"Key-frame filtering failed:\n{e}")
+        finally:
+            if self.kfProgress:
+                try:
+                    self.kfProgress.setValue(self.kfProgress.maximum)
+                except Exception:
+                    pass
+                self.kfProgress.setVisible(False)
+            self._setBusy(False)
+
+    def _extract_mask_array(self, mask_entry, ref_shape_hw):
+        """
+        Convert a variety of 'mask_like' (torch tensor, dicts from SAM, lists of masks, np arrays)
+        into a binary uint8 array with shape (H, W), values in {0, 255}. If unavailable, return zeros.
+        """
+        import numpy as np
+        try:
+            import torch
+        except Exception:
+            torch = None
+
+        def _as_numpy(x):
+            if x is None:
+                return None
+            if torch is not None and isinstance(x, torch.Tensor):
+                return x.detach().float().cpu().numpy()
+            if isinstance(x, dict):
+                for key in ("segmentation", "mask", "masks"):
+                    if key in x:
+                        return _as_numpy(x[key])
+                return None
+            if isinstance(x, (list, tuple)):
+                for item in x:
+                    arr = _as_numpy(item)
+                    if arr is not None:
+                        return arr
+                return None
+            try:
+                return np.asarray(x)
+            except Exception:
+                return None
+
+        H, W = ref_shape_hw
+        arr = _as_numpy(mask_entry)
+        if arr is None:
+            return np.zeros((H, W), dtype=np.uint8)
+
+        # Squeeze common cases from SAM outputs
+        if arr.ndim == 4:
+            arr = arr[0, 0]
+        elif arr.ndim == 3:
+            arr = arr[0]
+
+        # Binarize and scale to 0/255
+        arr = (arr > 0.5).astype(np.uint8) if arr.dtype != np.uint8 else (arr > 0).astype(np.uint8)
+        if arr.shape != (H, W):
+            import cv2
+            arr = cv2.resize(arr, (W, H), interpolation=cv2.INTER_NEAREST)
+            arr = (arr > 0).astype(np.uint8)
+        return (arr * 255).astype(np.uint8)
+
+    def _buildMaskedFramesBuffer(self):
+        """
+        Build self.framesMaskedBuffer by applying self.masksBuffer over self.framesBuffer.
+        Shows a cancellable QProgressDialog and handles UI pumping correctly.
+        """
+        import numpy as np
+        import cv2
+
+        if not isinstance(self.framesBuffer, list) or len(self.framesBuffer) == 0:
+            raise RuntimeError("No frames loaded; cannot build masked frames.")
+        if not isinstance(self.masksBuffer, dict) or len(self.masksBuffer) == 0:
+            raise RuntimeError("No per-frame masks available; run SAMURAI masking first.")
+
+        N = len(self.framesBuffer)
+        dlg = qt.QProgressDialog("Preparing masked frames?", "Cancel", 0, N, slicer.util.mainWindow())
+        dlg.setWindowTitle("SamuraiVideoMasking")
+        dlg.setWindowModality(qt.Qt.ApplicationModal)
+        dlg.setAutoReset(True)
+        dlg.setAutoClose(True)
+        dlg.setMinimumDuration(0)  # show immediately
+
+        cancelled = {"flag": False}
+
+        def _on_cancel():
+            cancelled["flag"] = True
+
+        dlg.canceled.connect(_on_cancel)
+
+        masked = []
+        for i, fr in enumerate(self.framesBuffer):
+            if cancelled["flag"]:
+                dlg.close()
+                raise RuntimeError("User cancelled masked-frame preparation.")
+
+            if fr is None:
+                dlg.close()
+                raise RuntimeError(f"Frame {i} is None.")
+
+            H, W = fr.shape[:2]
+            mask_bin = self._extract_mask_array(self.masksBuffer.get(i), (H, W))
+            if mask_bin is None or mask_bin.ndim != 2:
+                out = np.zeros_like(fr)
+            else:
+                out = fr.copy()
+                out[mask_bin == 0] = 0
+            masked.append(out)
+
+            dlg.setValue(i + 1)
+            slicer.app.processEvents()
+
+        dlg.close()
+        self.framesMaskedBuffer = masked
+
+    def _setKeyframeFilterControlsEnabled(self, enabled: bool):
+        """
+        Toggle availability of the Stage-1 key-frame filtering controls.
+        Called to keep key-frame filtering disabled until SAMURAI masking produces in-memory masks.
+        """
+        try:
+            self.kfSlider.setEnabled(enabled)
+            self.kfRunBtn.setEnabled(enabled)
+        except Exception:
+            pass
+        try:
+            # Progress bar is controlled by detect_keyframes; keep it disabled in idle
+            self.kfProgress.setVisible(False)
+            self.kfProgress.setEnabled(enabled)
+        except Exception:
+            pass
+
+    def _setSaveControlsEnabled(self, browse_enabled: bool, save_enabled: bool):
+        """
+        Controls Save section availability:
+          - browse_enabled: enables the folder picker once masks exist
+          - save_enabled: enables the 'Save' button once a valid folder is picked
+        """
+        try:
+            self.saveRootDirButton.setEnabled(browse_enabled)
+        except Exception:
+            pass
+        try:
+            self.saveRunBtn.setEnabled(save_enabled)
+        except Exception:
+            pass
+        try:
+            self.saveProgress.setVisible(False)
+        except Exception:
+            pass
+
+    def onBrowseSaveFolder(self, newDir: str):
+        """
+        Folder picker callback. Saves the selected path and enables the Save button
+        ONLY if SAMURAI masks are already available.
+        """
+        try:
+            path = str(newDir or "").strip()
+        except Exception:
+            path = ""
+        self.saveRootDirPath = path
+        have_masks = isinstance(self.masksBuffer, dict) and len(self.masksBuffer) > 0
+        self._setSaveControlsEnabled(browse_enabled=have_masks,
+                                     save_enabled=bool(have_masks and path and os.path.isdir(path)))
+        if have_masks and path and os.path.isdir(path):
+            self.saveStatusLabel.setText(f"Ready to save to: {path}")
+        elif have_masks:
+            self.saveStatusLabel.setText("Please pick a valid save folder?")
+        else:
+            self.saveStatusLabel.setText("Waiting for SAMURAI masks?")
+
+    def onSaveOutputsClicked(self):
+        """
+        Save dispatcher. Uses key-frame results if present; otherwise saves all frames.
+        Writes originals to 'original/' and masks + masked frames to 'masked/' under the
+        chosen root folder.
+        """
+        # Guard: masks must exist, and folder must be selected
+        if not (isinstance(self.masksBuffer, dict) and len(self.masksBuffer) > 0):
+            slicer.util.messageBox("Masks are not available yet. Run 'Run SAMURAI Masking' first.")
+            return
+        save_root = (self.saveRootDirPath or "").strip()
+        if not save_root or not os.path.isdir(save_root):
+            slicer.util.messageBox("Please pick a valid folder to save into.")
+            return
+
+        # Pick source frames + indices
+        if isinstance(self.keyFrameIndices, list) and self.keyFrameIndices and isinstance(self.keyFramesBuffer,
+                                                                                          list) and self.keyFramesBuffer:
+            frames_to_save = list(self.keyFramesBuffer)
+            indices = list(self.keyFrameIndices)
+            self._log(f"Saving key-frame selection: {len(frames_to_save)} frames.")
+        else:
+            if not isinstance(self.framesBuffer, list) or not self.framesBuffer:
+                slicer.util.messageBox("No frames are loaded.")
+                return
+            frames_to_save = list(self.framesBuffer)
+            indices = list(range(len(frames_to_save)))
+            self._log(f"Saving all frames: {len(frames_to_save)} frames.")
+
+        # Make sure save deps exist (Pillow, piexif, pymediainfo)
+        try:
+            self._ensure_save_deps()
+        except Exception as e:
+            self._log(f"Saving prerequisites failed: {e}")
+            slicer.util.errorDisplay(f"Saving prerequisites failed:\n{e}")
+            return
+
+        # Extract EXIF-like metadata from the video file
+        video_path = self.mp4PathEdit.text.strip()
+        focal_mm, focal35, make, model = self._extract_video_metadata(video_path)
+
+        # Progress UI
+        total = len(frames_to_save)
+        self.saveProgress.setVisible(True)
+        self.saveProgress.setRange(0, total)
+        self.saveProgress.setValue(0)
+        slicer.app.processEvents()
+
+        # Perform the save
+        try:
+            self._save_processed_to_folder(
+                save_root_dir=save_root,
+                video_path=video_path,
+                frames=frames_to_save,
+                frame_indices=indices,
+                all_masks=self.masksBuffer,
+                focal_mm=focal_mm,
+                focal35=focal35,
+                make=make,
+                model=model
+            )
+            self.saveStatusLabel.setText(f"Saved {total} frame(s) to: {save_root}")
+            self._log(f"Save complete: {total} frame(s) -> {save_root}")
+        except Exception as e:
+            self._log(f"Save failed: {e}")
+            slicer.util.errorDisplay(f"Save failed:\n{e}")
+        finally:
+            self.saveProgress.setVisible(False)
+
+    def _ensure_save_deps(self):
+        """
+        Ensure the libraries required for saving/EXIF are present.
+        - Pillow (PIL) ? image IO and EXIF writing bridge
+        - piexif ? EXIF injection
+        - pymediainfo ? extract EXIF-like info from video container
+        """
+        try:
+            import PIL  # noqa
+        except Exception:
+            self._pip("Pillow", "Installing Pillow (for EXIF writing)")
+            import PIL  # noqa
+        try:
+            import piexif  # noqa
+        except Exception:
+            self._pip("piexif", "Installing piexif (for EXIF injection)")
+            import piexif  # noqa
+        try:
+            from pymediainfo import MediaInfo  # noqa
+        except Exception:
+            self._pip("pymediainfo", "Installing pymediainfo (for video metadata)")
+            from pymediainfo import MediaInfo  # noqa
+
+    def _extract_video_metadata(self, video_path: str):
+        """
+        Pull minimal metadata from a video container (via pymediainfo).
+        Returns (focal_mm, focal35, make, model), where any may be None if missing.
+        """
+        focal_mm = None
+        focal35 = None
+        make = "Apple"
+        model = "iPhone"
+        try:
+            from pymediainfo import MediaInfo
+            mi = MediaInfo.parse(video_path) if video_path and os.path.isfile(video_path) else None
+            if mi:
+                for t in mi.tracks:
+                    if t.track_type != "Video":
+                        continue
+                    if getattr(t, "focal_length", None):
+                        try:
+                            focal_mm = float(t.focal_length)
+                        except Exception:
+                            pass
+                    if getattr(t, "focal_length_in_35mm_format", None):
+                        try:
+                            focal35 = int(t.focal_length_in_35mm_format)
+                        except Exception:
+                            pass
+                    if getattr(t, "make", None):
+                        make = t.make
+                    if getattr(t, "model", None):
+                        model = t.model
+                    break
+        except Exception:
+            pass
+        return focal_mm, focal35, make, model
+
+    def _embed_exif_into_jpg(self, jpg_path: str, focal_mm, focal35, make="Apple", model="iPhone"):
+        """
+        Inject minimal EXIF so downstream photogrammetry tools see sane camera info.
+        """
+        try:
+            from PIL import Image
+            import piexif
+            img = Image.open(jpg_path)
+            exif = {"0th": {}, "Exif": {}, "1st": {}, "thumbnail": None, "GPS": {}}
+            if make:
+                exif["0th"][piexif.ImageIFD.Make] = str(make)
+            if model:
+                exif["0th"][piexif.ImageIFD.Model] = str(model)
+            if focal_mm is not None:
+                exif["Exif"][piexif.ExifIFD.FocalLength] = (int(float(focal_mm) * 100), 100)
+            if focal35 is not None:
+                exif["Exif"][piexif.ExifIFD.FocalLengthIn35mmFilm] = int(focal35)
+            img.save(jpg_path, exif=piexif.dump(exif))
+        except Exception:
+            # Non-fatal if EXIF injection fails?files are still written
+            pass
+
+    def _build_masked_frame_from_bgr_and_mask(self, frame_bgr, mask_uint8):
+        """
+        Given BGR frame and its uint8 mask (0/255), zero-out background and return masked BGR.
+        """
+        import numpy as np
+        if mask_uint8 is None:
+            return np.zeros_like(frame_bgr)
+        m = (mask_uint8 > 0).astype(np.uint8)
+        if m.ndim != 2:
+            return np.zeros_like(frame_bgr)
+        m3 = np.stack([m, m, m], axis=-1)
+        return frame_bgr * m3
+
+    def _save_processed_to_folder(self,
+                                  save_root_dir: str,
+                                  video_path: str,
+                                  frames: list,
+                                  frame_indices: list,
+                                  all_masks: dict,
+                                  focal_mm,
+                                  focal35,
+                                  make,
+                                  model):
+        """
+        Save images according to your spec:
+          - save_root_dir/
+                original/   -> original frames  (videoStem_index.jpg)
+                masked/     -> masked frames    (videoStem_index.jpg)
+                               binary masks     (videoStem_index_mask.jpg)
+        EXIF is embedded on every JPEG.
+        """
+        import cv2
+        os.makedirs(save_root_dir, exist_ok=True)
+        # Choose subfolders named exactly as requested
+        original_dir = os.path.join(save_root_dir, "original")
+        masked_dir = os.path.join(save_root_dir, "masked")
+        os.makedirs(original_dir, exist_ok=True)
+        os.makedirs(masked_dir, exist_ok=True)
+
+        # Build a filestem from video name (stable & human-readable)
+        try:
+            stem = Path(video_path).stem if video_path else "frames"
+        except Exception:
+            stem = "frames"
+
+        total = len(frames)
+        for i, fr in enumerate(frames):
+            idx = frame_indices[i] if i < len(frame_indices) else i
+            basename = f"{stem}_{idx:06d}"
+
+            # (A) original
+            orig_path = os.path.join(original_dir, f"{basename}.jpg")
+            cv2.imwrite(orig_path, fr)
+            self._embed_exif_into_jpg(orig_path, focal_mm, focal35, make, model)
+
+            # (B) mask (uint8 0/255) ? derive from in-memory dict; fall back to zeros if missing
+            H, W = fr.shape[:2]
+            mask_u8 = None
+            try:
+                mm = all_masks.get(idx, None)
+                if mm is None:
+                    mask_u8 = None
+                else:
+                    # Your masksBuffer stores an already-binarized uint8 0/255 array per fid
+                    # (see onRunTracking). If some entries are tensors or arrays, normalize.
+                    import numpy as np
+                    if hasattr(mm, "detach") and hasattr(mm, "cpu"):  # torch Tensor style
+                        m = mm.detach().float().cpu().numpy()
+                        if m.ndim == 3:
+                            m = (m > 0.5).any(axis=0).astype("uint8")
+                        else:
+                            m = (m > 0.5).astype("uint8")
+                        mask_u8 = (m * 255).astype("uint8")
+                    else:
+                        m = mm
+                        try:
+                            import numpy as np
+                            m = np.asarray(m)
+                            if m.dtype != np.uint8:
+                                m = ((m > 0) * 255).astype("uint8")
+                            # resize if needed
+                            if m.ndim == 2 and (m.shape[0] != H or m.shape[1] != W):
+                                m = cv2.resize(m, (W, H), interpolation=cv2.INTER_NEAREST)
+                        except Exception:
+                            m = None
+                        mask_u8 = m
+            except Exception:
+                mask_u8 = None
+
+            if mask_u8 is None:
+                import numpy as np
+                mask_u8 = np.zeros((H, W), dtype="uint8")
+
+            # Save mask (_mask.jpg)
+            mask_path = os.path.join(masked_dir, f"{basename}_mask.jpg")
+            cv2.imwrite(mask_path, mask_u8)
+            self._embed_exif_into_jpg(mask_path, focal_mm, focal35, make, model)
+
+            # (C) masked frame
+            masked_bgr = self._build_masked_frame_from_bgr_and_mask(fr, mask_u8)
+            masked_path = os.path.join(masked_dir, f"{basename}.jpg")
+            cv2.imwrite(masked_path, masked_bgr)
+            self._embed_exif_into_jpg(masked_path, focal_mm, focal35, make, model)
+
+            # progress
+            try:
+                self.saveProgress.setValue(i + 1)
+                slicer.app.processEvents()
+            except Exception:
+                pass
 
 
 # -------------------------
