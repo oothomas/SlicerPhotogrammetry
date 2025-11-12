@@ -261,7 +261,7 @@ class ClusterPhotosWidget(ScriptedLoadableModuleWidget):
                     raise InstallError("User cancelled.")
 
                 logging.debug('Installing PyTorch via the PyTorch extension...')
-                torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu118')
+                torch = torchLogic.installTorch(askConfirmation=True, forceComputationBackend='cu126')
                 if torch:
                     restart = slicer.util.confirmYesNoDisplay(
                         "PyTorch dependencies have been installed. A restart of 3D Slicer is needed. Restart now?"
@@ -286,7 +286,7 @@ class ClusterPhotosWidget(ScriptedLoadableModuleWidget):
         try:
             import transformers
         except ImportError:
-            slicer.util.pip_install("transformers==4.29.2")
+            slicer.util.pip_install("transformers>4.29.2")
             import transformers
 
         # scikit-learn

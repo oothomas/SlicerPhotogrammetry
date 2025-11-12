@@ -535,17 +535,22 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
 
     def _install_python_deps(self, repo_dir: Path):
         """
-        Install SAM-2 (editable) and its runtime deps, including video backends.
+        Install SAM-2 and its runtime deps in a way that is resilient on Slicer's embedded Python.
+        Strategy:
+          1) Try editable install from <repo>/sam2 (primary).
+          2) Install core deps and video backends.
+          3) Ensure 'sam2' is importable by adding paths and invalidating caches.
+          4) If still not importable, try editable install from repo root as a fallback,
+             re-add paths, re-invalidate caches, and verify again.
         """
-        # Install sam2 editable if present
+        # 1) Primary editable install from '<repo>/sam2' when present
         sam2_dir = repo_dir / "sam2"
         if sam2_dir.is_dir():
-            self._pip(f'-e "{sam2_dir}"', desc="Installing SAM2 (editable)?")
+            self._pip(f'-e "{sam2_dir}"', desc="Installing SAM2 (editable) from sam2/ ?")
         else:
-            self._log("WARNING: 'sam2' directory not found; installing repo root as editable instead.")
-            self._pip(f'-e "{repo_dir}"', desc="Installing repo (editable)?")
+            self._log("WARNING: 'sam2' directory not found under repo; will try repo root afterwards.")
 
-        # Core deps used in your flow
+        # 2) Core runtime deps used in the pipeline
         base = [
             "hydra-core",
             "omegaconf",
@@ -558,18 +563,92 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             "lmdb",
         ]
         for pkg in base:
-            self._pip(pkg, desc=f"pip install {pkg}?")
+            self._pip(pkg, desc=f"pip install {pkg} ?")
 
-        # ? NEW: video I/O backends (decord preferred)
+        # 3) Video I/O backends (decord preferred) + verify
         self._ensure_video_backends()
 
-        # Quick sanity: sam2 import should succeed now
+        # 4) Make sure sam2 can be imported right now (add paths + invalidate caches)
         try:
-            import importlib, sam2  # noqa: F401
-            importlib.reload(sam2)
-            self._log(f"sam2 OK: {sam2.__file__}")
+            self._ensure_sam2_installed_and_in_path(repo_dir)
+            self._log("sam2 import OK after sam2/ editable install.")
+            return
+        except Exception as e_first:
+            self._log(f"sam2 import still failing after sam2/ editable install: {e_first}")
+
+        # 5) Fallback: editable install from repo root (some forks package from top-level)
+        self._pip(f'-e "{repo_dir}"', desc="Fallback: Installing repo (editable) from repo root ?")
+
+        # 6) Re-ensure importability after fallback
+        self._ensure_sam2_installed_and_in_path(repo_dir)
+        self._log("sam2 import OK after repo-root editable install.")
+
+    def _ensure_sam2_installed_and_in_path(self, repo_dir: Path):
+        """
+        Ensure 'sam2' is importable in this Slicer session:
+          - Invalidate import caches
+          - Add site dirs, repo root, and <repo>/sam2 to sys.path
+          - Export PYTHONPATH for child imports in this process
+          - Verify import and log resolved file
+        Raises if import still fails.
+        """
+        import importlib, site
+
+        # Candidate paths that should expose the package
+        candidates = set()
+
+        # Site dirs that pip installs into inside Slicer
+        try:
+            for d in site.getsitepackages():
+                if os.path.isdir(d):
+                    candidates.add(d)
+        except Exception:
+            pass
+        try:
+            us = site.getusersitepackages()
+            if us and os.path.isdir(us):
+                candidates.add(us)
+        except Exception:
+            pass
+
+        # Repo root and sam2/ subfolder (both can matter on some forks)
+        try:
+            if repo_dir and repo_dir.is_dir():
+                candidates.add(str(repo_dir))
+                sam2_dir = repo_dir / "sam2"
+                if sam2_dir.is_dir():
+                    candidates.add(str(sam2_dir))
+        except Exception:
+            pass
+
+        # Add candidates via site API and also prepend to sys.path
+        for p in list(candidates):
+            try:
+                site.addsitedir(p)
+            except Exception:
+                pass
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
+        # Export PYTHONPATH so any subsequent dynamic import paths see these immediately
+        py_path = os.environ.get("PYTHONPATH", "")
+        for p in candidates:
+            if p and p not in py_path:
+                py_path = (p if not py_path else (p + os.pathsep + py_path))
+        if py_path:
+            os.environ["PYTHONPATH"] = py_path
+
+        # Invalidate caches then import
+        import importlib
+        importlib.invalidate_caches()
+
+        try:
+            import sam2  # noqa
+            self._log(f"sam2 resolved at: {getattr(sam2, '__file__', '(no __file__)')}")
         except Exception as e:
-            self._log(f"sam2 import failed even after install: {e}")
+            # Final diagnostic: list a few sys.path entries to help debugging
+            head = "\n".join(sys.path[:8])
+            self._log(f"sam2 import failed after path fix. sys.path head:\n{head}")
             raise
 
     def _maybe_run_checkpoint_script(self, repo_dir: Path):
@@ -736,21 +815,47 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                 ("torch", "import torch as m; (m.__version__, getattr(m.version,'cuda',None))"),
                 ("torchvision", "import torchvision as m; m.__version__"),
             ]
+
             ok_all = True
+            sam2_failed = False
             for label, code in checks:
                 try:
                     ns = {}
                     exec(code, {}, ns)
                     self._log(f"OK: {label} -> {list(ns.values())[-1]}")
                 except Exception as e:
-                    ok_all = False
                     self._log(f"FAIL: {label} import error -> {e}")
+                    ok_all = False
+                    if label == "sam2":
+                        sam2_failed = True
+
+            # If sam2 failed, try to heal automatically once
+            if sam2_failed:
+                self._log("Attempting to auto-heal 'sam2' import by adding repo paths and invalidating caches?")
+                # Discover repo path from settings
+                repo_path = qt.QSettings().value(self.SETTINGS_REPO_PATH, "")
+                try:
+                    repo_dir = Path(repo_path) if repo_path else None
+                except Exception:
+                    repo_dir = None
+
+                if repo_dir and repo_dir.exists():
+                    try:
+                        self._ensure_sam2_installed_and_in_path(repo_dir)
+                        # re-run sam2 import check
+                        ns = {}
+                        exec("import sam2 as m; getattr(m, '__version__', 'OK')", {}, ns)
+                        self._log(f"Auto-heal succeeded: sam2 -> {list(ns.values())[-1]}")
+                        ok_all = True  # sam2 recovered; other libs already OK or logged
+                    except Exception as heal_e:
+                        self._log(f"Auto-heal failed: {heal_e}")
 
             if ok_all:
                 self._refreshDeviceList()
                 self._log("Verification passed.")
             else:
-                self._log("Verification finished with errors. If 'decord' failed, click Configure again.")
+                self._log("Verification finished with errors. If 'sam2' failed, click Configure again.")
+
         finally:
             self._setBusy(False)
 
@@ -783,6 +888,12 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             self.framesDirEdit.setText(str(p.parent / p.stem))
 
     def onLoadVideo(self):
+        """
+        Load video workflow with A100-40G size guard:
+          - Probe video (W, H, FPS, N frames) with OpenCV (fast, no decode)
+          - If total pixels exceeds a conservative A100 40GB budget, warn and abort
+          - Otherwise proceed with convert-if-MOV and frame extraction (unchanged)
+        """
         src = self.videoPathEdit.text.strip()
         if not src:
             slicer.util.messageBox("Please choose a source video first.")
@@ -792,17 +903,38 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             slicer.util.messageBox(f"Video not found:\n{src}")
             return
 
+        # ---- NEW: fast video size probe + guard for A100 40GB ----
+        try:
+            m = self._probe_video_metrics(str(p))
+            if m and m.get("width") and m.get("height") and m.get("frames"):
+                too_big, msg = self._guard_warn_if_video_too_large(
+                    width=int(m["width"]),
+                    height=int(m["height"]),
+                    frames=int(m["frames"])
+                )
+                if too_big:
+                    # Hard-stop by default (user can split and retry)
+                    slicer.util.messageBox(msg)
+                    self._log("Aborting load due to A100-40G size guard (video too large).")
+                    return
+            else:
+                # If we cannot probe, proceed (we'll still work; just no early guard)
+                self._log("WARNING: Could not probe video size; skipping GPU budget guard.")
+        except Exception as e:
+            self._log(f"WARNING: Video metrics probe failed: {e}. Continuing without guard.")
+
         target_mp4 = Path(self.mp4PathEdit.text.strip() or (str(p.with_suffix(".mp4"))))
         frames_dir = Path(self.framesDirEdit.text.strip() or (str(p.parent / p.stem)))
 
         if not slicer.util.confirmOkCancelDisplay(
-            "Video prep will run on the main thread and may freeze the UI.\nProceed?",
-            "Blocking Video Prep"
+                "Video prep will run on the main thread and may freeze the UI.\nProceed?",
+                "Blocking Video Prep"
         ):
             return
 
         self._setBusy(True)
         try:
+            # 1) Convert MOV?MP4 if needed
             if p.suffix.lower() == ".mov":
                 self._log(f"Converting MOV ? MP4:\n{p}  ?  {target_mp4}")
                 self._mov_to_mp4_blocking(str(p), str(target_mp4))
@@ -812,10 +944,11 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
                     target_mp4 = p
                 self._log(f"Using MP4 input: {target_mp4}")
 
+            # 2) Prepare frames directory (prompt if exists)
             if frames_dir.exists():
                 if slicer.util.confirmYesNoDisplay(
-                    f"Frames folder exists:\n{frames_dir}\n\nDelete contents and re-extract?",
-                    "Frames folder exists"
+                        f"Frames folder exists:\n{frames_dir}\n\nDelete contents and re-extract?",
+                        "Frames folder exists"
                 ):
                     self._log(f"Cleaning frames folder: {frames_dir}")
                     self._safe_empty_dir(frames_dir)
@@ -827,10 +960,12 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             frames_dir.mkdir(parents=True, exist_ok=True)
             self.framesDirEdit.setText(str(frames_dir))
 
+            # 3) Extract frames (JPEG)
             self._log(f"Extracting frames ? {frames_dir}")
             n = self._extract_frames_blocking(str(target_mp4), str(frames_dir))
             self._log(f"Done. Extracted {n} frames.")
 
+            # Save last paths
             s = qt.QSettings()
             s.setValue(self.SETTINGS_LAST_VIDEO, str(p))
             s.setValue(self.SETTINGS_LAST_MP4, str(target_mp4))
@@ -841,6 +976,143 @@ class SamuraiVideoMaskingWidget(ScriptedLoadableModuleWidget):
             slicer.util.errorDisplay(f"Video prep failed:\n{e}")
         finally:
             self._setBusy(False)
+
+    def _probe_video_metrics(self, video_path: str) -> dict:
+        """
+        Fast probe of video metrics without decoding payload.
+        Returns dict with keys: width, height, fps, frames (ints/floats), or {} on failure.
+        """
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {}
+        try:
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            # Some containers report 0 frames; derive from duration if available
+            if f <= 0 and fps > 0:
+                dur_ms = cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0  # not reliable on all backends
+            return {"width": w, "height": h, "frames": f, "fps": fps}
+        finally:
+            cap.release()
+
+    def _a100_40g_pixel_budget(self) -> int:
+        """
+        Return the total pixel budget (W*H*N) allowed before warning.
+        Reads an overridable value (in Gpx) from QSettings at
+          SamuraiVideoMasking/pixelBudgetGpx
+        Default: 5.5 Gpx (~5_500_000_000 pixels), which comfortably allows 2160×3840×586.
+        """
+        s = qt.QSettings()
+        gpx_str = s.value(f"{self.SETTINGS_KEY}/pixelBudgetGpx", "5.5")
+        try:
+            gpx = float(gpx_str)
+        except Exception:
+            gpx = 5.5
+        # Clamp to a sane minimum so users can't accidentally brick the guard
+        gpx = max(0.1, gpx)
+        return int(gpx * 1_000_000_000)
+
+    def _guard_warn_if_video_too_large(self, width: int, height: int, frames: int) -> tuple[bool, str]:
+        """
+        Check (W * H * N) against the configured pixel budget.
+        Returns (too_large: bool, message: str). If too_large is True, caller should abort.
+        """
+        W = max(1, int(width))
+        H = max(1, int(height))
+        N = max(1, int(frames))
+        total_px = W * H * N
+        budget_px = self._a100_40g_pixel_budget()
+
+        if total_px <= budget_px:
+            return (False, "")
+
+        # Compute a recommended max frames at this resolution under the current budget
+        rec_frames = max(1, budget_px // (W * H))
+
+        # Pretty print
+        mp = (W * H) / 1_000_000.0
+        gp = total_px / 1_000_000_000.0
+        bg = budget_px / 1_000_000_000.0
+
+        msg = (
+            "This video is likely too large for the current SAMURAI pixel budget.\n\n"
+            f"Resolution: {W}×{H} (~{mp:.2f} MP)\n"
+            f"Frames: {N}\n"
+            f"Total pixels: ~{gp:.2f} Gpx (budget ? {bg:.2f} Gpx)\n\n"
+            f"Recommendation: split the clip so each chunk has ? ~{rec_frames} frames at this resolution, "
+            "or downscale.\n\n"
+            "Please split the video and try again."
+        )
+        return (True, msg)
+
+    def _guard_warn_if_video_too_large(self, width: int, height: int, frames: int) -> tuple[bool, str]:
+        """
+        Check (W * H * N) against the configured pixel budget.
+        Returns (too_large: bool, message: str). If too_large is True, caller should abort.
+        """
+        W = max(1, int(width))
+        H = max(1, int(height))
+        N = max(1, int(frames))
+        total_px = W * H * N
+        budget_px = self._a100_40g_pixel_budget()
+
+        if total_px <= budget_px:
+            return (False, "")
+
+        # Compute a recommended max frames at this resolution under the current budget
+        rec_frames = max(1, budget_px // (W * H))
+
+        # Pretty print
+        mp = (W * H) / 1_000_000.0
+        gp = total_px / 1_000_000_000.0
+        bg = budget_px / 1_000_000_000.0
+
+        msg = (
+            "This video is likely too large for the current SAMURAI pixel budget.\n\n"
+            f"Resolution: {W}×{H} (~{mp:.2f} MP)\n"
+            f"Frames: {N}\n"
+            f"Total pixels: ~{gp:.2f} Gpx (budget ? {bg:.2f} Gpx)\n\n"
+            f"Recommendation: split the clip so each chunk has ? ~{rec_frames} frames at this resolution, "
+            "or downscale.\n\n"
+            "Please split the video and try again."
+        )
+        return (True, msg)
+
+    def _guard_warn_if_video_too_large(self, width: int, height: int, frames: int) -> tuple[bool, str]:
+        """
+        Check (W * H * N) against the configured pixel budget.
+        Returns (too_large: bool, message: str). If too_large is True, caller should abort.
+        """
+        W = max(1, int(width))
+        H = max(1, int(height))
+        N = max(1, int(frames))
+        total_px = W * H * N
+        budget_px = self._a100_40g_pixel_budget()
+
+        if total_px <= budget_px:
+            return (False, "")
+
+        # Compute a recommended max frames at this resolution under the current budget
+        rec_frames = max(1, budget_px // (W * H))
+
+        # Pretty print
+        mp = (W * H) / 1_000_000.0
+        gp = total_px / 1_000_000_000.0
+        bg = budget_px / 1_000_000_000.0
+
+        msg = (
+            "This video is likely too large for the current SAMURAI pixel budget.\n\n"
+            f"Resolution: {W}×{H} (~{mp:.2f} MP)\n"
+            f"Frames: {N}\n"
+            f"Total pixels: ~{gp:.2f} Gpx (budget ? {bg:.2f} Gpx)\n\n"
+            f"Recommendation: split the clip so each chunk has ? ~{rec_frames} frames at this resolution, "
+            "or downscale.\n\n"
+            "Please split the video and try again."
+        )
+        return (True, msg)
 
     def _mov_to_mp4_blocking(self, mov_path: str, mp4_path: str):
         import cv2
